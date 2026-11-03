@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::convert::{IfExists, Kind, Params, PngLevel, ResizeFilter};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(PartialEq)]
 pub struct ConvertPrefs {
     pub params: Params,
     pub anim: Params,

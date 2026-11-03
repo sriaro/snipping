@@ -224,7 +224,6 @@ const TO_CB: [i32; 3] = [-6596, -22188, 28784];
 const TO_CR: [i32; 3] = [28784, -26145, -2639];
 
 fn to_nv12(bgra: &[u8], width: usize, (w, h): (usize, usize), out: &mut [u8]) {
-    debug_assert!(w % 2 == 0 && h % 2 == 0 && w <= width && out.len() == w * h * 3 / 2);
     let y_of = |p: &[u8; 4]| ((TO_Y[0] * p[2] as i32 + TO_Y[1] * p[1] as i32 + TO_Y[2] * p[0] as i32 + (16 << 16) + (1 << 15)) >> 16) as u8;
     let row = |y: usize| &bgra[y * width * 4..][..w * 4];
     let (luma, chroma) = out.split_at_mut(w * h);

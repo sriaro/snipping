@@ -9,7 +9,7 @@ use std::{
     },
     time::Instant,
 };
-use tiny_skia::{BlendMode, Color, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pattern, Pixmap, Point, SpreadMode, Stroke, Transform};
+use tiny_skia::{BlendMode, Color, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pattern, Pixmap, PixmapMut, Point, SpreadMode, Stroke, Transform};
 use windows::{
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
@@ -176,7 +176,7 @@ struct State {
     origin: POINT,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(PartialEq)]
 enum Open {
     Plain,
     Passive,
@@ -367,8 +367,7 @@ fn hold_fade() -> Option<(Arc<Fade>, HWND)> {
 
 fn play_close(fade: Arc<Fade>, root: HWND) {
     let me = root.0 as isize;
-    let theirs = fade.clone();
-    if std::thread::Builder::new().name("menu-fold".into()).spawn(move || run_close(&theirs, me)).is_err() {
+    if std::thread::Builder::new().name("menu-fold".into()).spawn(move || run_close(&fade, me)).is_err() {
         let _ = end_fade();
     }
 }
@@ -413,7 +412,6 @@ fn run_close_with(fade: &Fade, root: isize, mut show: impl FnMut(&Level, (POINT,
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
 enum Step {
     Playing,
     Failed,
@@ -715,9 +713,17 @@ pub(crate) fn compose(base: &Pixmap, t: f32, anchor: (f32, f32), s: f32) -> Opti
     let lift = -6.0 * s * (1.0 - e);
     let opacity = bezier(EASE_OUT, (t * 1.5).clamp(0.0, 1.0));
     let tf = Transform::from_translate(-anchor.0, -anchor.1).post_scale(scale, scale).post_translate(anchor.0, anchor.1 + lift);
-    let mut out = Pixmap::new(base.width(), base.height())?;
+    let (w, h) = (base.width(), base.height());
+    let mut out = Pixmap::new(w, h)?;
     let paint = tiny_skia::PixmapPaint { opacity, quality: FilterQuality::Bilinear, ..Default::default() };
-    out.draw_pixmap(0, 0, base.as_ref(), &paint, tf, None);
+    let row_len = w as usize * 4;
+    let per = (h as usize).div_ceil(crate::par::workers() * 2).max(1);
+    crate::par::bands(out.data_mut(), per * row_len, |i, band| {
+        let rows = (band.len() / row_len) as u32;
+        if let Some(mut part) = PixmapMut::from_bytes(band, w, rows) {
+            part.draw_pixmap(0, 0, base.as_ref(), &paint, tf.post_translate(0.0, -((i * per) as f32)), None);
+        }
+    });
     Some(out)
 }
 
@@ -809,8 +815,7 @@ pub(crate) fn push(hwnd: HWND, dc: HDC, alpha: u8, place: Option<(POINT, SIZE)>)
     let src = POINT { x: 0, y: 0 };
     unsafe {
         let r = UpdateLayeredWindow(hwnd, None, place.as_ref().map(|p| &p.0 as *const POINT), place.as_ref().map(|p| &p.1 as *const SIZE), Some(dc), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
-        if let Err(e) = r {
-            crate::log(&format!("menu: UpdateLayeredWindow(place={}): {e}", place.is_some()));
+        if r.is_err() {
             return false;
         }
     }

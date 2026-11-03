@@ -9,7 +9,7 @@ extern crate serde_yaml;
 use self::serde::{Serialize,Deserialize};
 
 extern crate image;
-use image::{RgbImage, DynamicImage};
+use image::DynamicImage;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -128,15 +128,6 @@ impl PipelineSettings{
 pub struct PipelineGlobals {
   pub image: ImageSource,
   pub settings: PipelineSettings,
-}
-
-impl PipelineGlobals {
-  pub fn mock(width: u32, height: u32) -> Self {
-    Self {
-      image: ImageSource::Other(DynamicImage::ImageRgb8(RgbImage::new(width, height))),
-      settings: PipelineSettings::default(),
-    }
-  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

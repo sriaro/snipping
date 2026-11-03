@@ -20,7 +20,7 @@ pub fn heic_any(bytes: &[u8]) -> Result<crate::convert::Picture> {
         return heic(bytes).map(|(px, w, h)| Picture { px: Decoded::Eight(px, w, h), icc });
     }
     let frame = heic::DecoderConfig::new().decode_to_frame(bytes).map_err(|e| anyhow!("HEIC: {e}"))?;
-    Ok(Picture { px: Decoded::Deep(crate::deep::from_heic_frame(&frame)?), icc: info.icc_profile.clone() })
+    Ok(Picture { px: Decoded::Deep(crate::deep::from_heic_frame(&frame)?), icc: info.icc_profile })
 }
 
 pub fn heic(bytes: &[u8]) -> Result<Rgba> {

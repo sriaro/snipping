@@ -134,7 +134,7 @@ struct Ghost {
     side: f32,
 }
 
-#[derive(Default, Clone, Copy, Debug, PartialEq)]
+#[derive(Default)]
 struct UiDraw {
     ui: [f32; 4],
     glass: [f32; 4],
@@ -322,13 +322,10 @@ fn tex_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
 }
 
 pub struct Gfx {
-    pub adapter_name: String,
     instance: wgpu::Instance,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     surface_losses: u8,
-    presented: bool,
-    last_selection: Option<[f32; 4]>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -362,7 +359,6 @@ struct Opened {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    name: String,
     max_dim: u32,
 }
 
@@ -413,20 +409,19 @@ fn make_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: w
     })
 }
 
-fn build_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, bool) {
+fn build_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     if device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS) {
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let pipeline = make_pipeline(device, layout, format, &precompiled_module(device, "vs", VS_DXBC), &precompiled_module(device, "fs", FS_DXBC));
         let rejected = pollster::block_on(validation.pop());
         let failed = pollster::block_on(internal.pop());
-        match rejected.or(failed) {
-            None => return (pipeline, true),
-            Some(e) => crate::log(&format!("precompiled shaders rejected, compiling at run time: {e}")),
+        if rejected.or(failed).is_none() {
+            return pipeline;
         }
     }
     let shader = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
-    (make_pipeline(device, layout, format, &shader, &shader), false)
+    make_pipeline(device, layout, format, &shader, &shader)
 }
 
 fn open_device(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Opened> {
@@ -441,18 +436,6 @@ fn open_device(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result
         _ => 4,
     };
     candidates.sort_by_key(|a| rank(a.get_info().device_type));
-    crate::log(&format!(
-        "gpus ({}): {}",
-        if laptop { "laptop: integrated first" } else { "desktop: discrete first" },
-        candidates
-            .iter()
-            .map(|a| {
-                let i = a.get_info();
-                format!("{} [{:?}]", i.name, i.device_type)
-            })
-            .collect::<Vec<_>>()
-            .join("; ")
-    ));
     let fallback = std::iter::once_with(|| {
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::None,
@@ -464,12 +447,8 @@ fn open_device(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result
     })
     .flatten();
     for adapter in candidates.into_iter().chain(fallback) {
-        match request_device(&adapter) {
-            Ok((device, queue)) => {
-                let info = adapter.get_info();
-                return Ok(Opened { name: format!("{} [{:?}, {:?}]", info.name, info.device_type, info.backend), max_dim: adapter.limits().max_texture_dimension_2d, adapter, device, queue });
-            }
-            Err(e) => crate::log(&format!("gpu {} unusable: {e:#}", adapter.get_info().name)),
+        if let Ok((device, queue)) = request_device(&adapter) {
+            return Ok(Opened { max_dim: adapter.limits().max_texture_dimension_2d, adapter, device, queue });
         }
     }
     anyhow::bail!("no usable Direct3D 12 adapter")
@@ -496,19 +475,17 @@ impl Gfx {
 
     pub fn finish(start: Start) -> Result<Self> {
         let Start { instance, window, surface } = start;
-        let Opened { adapter, device, queue, name: adapter_name, max_dim } = open_device(&instance, &surface)?;
+        let Opened { adapter, device, queue, max_dim } = open_device(&instance, &surface)?;
 
         let lost = Arc::new(AtomicBool::new(false));
         let on_error = lost.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            crate::log(&format!("wgpu error: {e}"));
             if !matches!(e, wgpu::Error::Validation { .. }) {
                 on_error.store(true, Ordering::Relaxed);
             }
         }));
         let on_lost = lost.clone();
-        device.set_device_lost_callback(move |reason, msg| {
-            crate::log(&format!("gpu device lost ({reason:?}): {msg}"));
+        device.set_device_lost_callback(move |_, _| {
             on_lost.store(true, Ordering::Relaxed);
         });
 
@@ -546,8 +523,7 @@ impl Gfx {
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let (pipeline, precompiled) = build_pipeline(&device, &pl, format);
-        crate::log(&format!("gpu {adapter_name}: {} shaders", if precompiled { "precompiled" } else { "run-time compiled" }));
+        let pipeline = build_pipeline(&device, &pl, format);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -558,7 +534,6 @@ impl Gfx {
 
         let rgba = wgpu::TextureFormat::Rgba8Unorm;
         Ok(Self {
-            adapter_name,
             label_tex: make_tex(&device, LABEL_W, LABEL_H, wgpu::TextureFormat::R8Unorm),
             layer: make_tex(&device, 1, 1, rgba),
             ui: make_tex(&device, 1, 1, rgba),
@@ -579,8 +554,6 @@ impl Gfx {
             window,
             surface,
             surface_losses: 0,
-            presented: false,
-            last_selection: None,
             device,
             queue,
             config,
@@ -596,23 +569,17 @@ impl Gfx {
     }
 
     pub fn set_text(&mut self, text: Option<Arc<Text>>) {
-        self.presented = false;
         self.text = text;
     }
 
     pub fn set_scale(&mut self, scale: f64) {
-        let scale = scale.clamp(1.0, 4.0) as f32;
-        if self.scale != scale {
-            self.presented = false;
-            self.scale = scale;
-        }
+        self.scale = scale.clamp(1.0, 4.0) as f32;
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
         if w == 0 || h == 0 || (w == self.config.width && h == self.config.height) {
             return;
         }
-        self.presented = false;
         self.config.width = w;
         self.config.height = h;
         self.surface.configure(&self.device, &self.config);
@@ -640,7 +607,6 @@ impl Gfx {
         if w > self.max_dim || h > self.max_dim {
             bail!("screen {w}x{h} exceeds GPU texture limit {}", self.max_dim);
         }
-        self.presented = false;
         self.resize(w, h);
         let tex = make_tex(&self.device, w, h, wgpu::TextureFormat::Bgra8Unorm);
         self.write(&tex.tex, [0, 0, w, h], bgra);
@@ -661,28 +627,20 @@ impl Gfx {
     }
 
     pub fn set_layer(&mut self, w: u32, h: u32, origin: (f32, f32)) {
-        self.presented = false;
         self.layer = make_tex(&self.device, w, h, wgpu::TextureFormat::Rgba8Unorm);
         self.layer_origin = Some([origin.0, origin.1]);
         self.rebuild_bind_group();
     }
 
     pub fn set_light(&mut self, light: bool) {
-        if self.light != light {
-            self.presented = false;
-            self.light = light;
-        }
+        self.light = light;
     }
 
     pub fn set_handles(&mut self, radius: f32) {
-        if self.handle != radius {
-            self.presented = false;
-            self.handle = radius;
-        }
+        self.handle = radius;
     }
 
     pub fn clear_layer(&mut self) {
-        self.presented = false;
         self.layer_origin = None;
     }
 
@@ -690,7 +648,6 @@ impl Gfx {
         if r[2] == 0 || r[3] == 0 {
             return;
         }
-        self.presented = false;
         self.write(&self.layer.tex, r, data);
     }
 
@@ -699,7 +656,6 @@ impl Gfx {
     }
 
     fn set_ui_at(&mut self, w: u32, h: u32, origin: (f32, f32), pill: [f32; 4], pill2: Option<[f32; 4]>, now: Instant) {
-        self.presented = false;
         let old = std::mem::replace(&mut self.ui, make_tex(&self.device, w, h, wgpu::TextureFormat::Rgba8Unorm));
         let drawn = std::mem::replace(&mut self.ui_written, false);
         if self.fx.place([origin.0, origin.1], pill, pill2.unwrap_or([0.0; 4]), drawn, now) {
@@ -709,9 +665,6 @@ impl Gfx {
     }
 
     pub fn set_loupe(&mut self, loupe: Option<LoupeGpu>, info: Option<(&[u8], u32, u32)>) {
-        if self.loupe.is_some() || loupe.is_some() || info.is_some() {
-            self.presented = false;
-        }
         self.loupe = loupe;
         let Some((data, w, h)) = info else { return };
         if self.loupe_tex.w != w || self.loupe_tex.h != h {
@@ -722,12 +675,10 @@ impl Gfx {
     }
 
     pub fn clear_ui(&mut self) {
-        self.presented = false;
         self.fx.clear();
     }
 
     pub fn hide_ui(&mut self) {
-        self.presented = false;
         self.fx.hide(Instant::now());
     }
 
@@ -736,7 +687,6 @@ impl Gfx {
     }
 
     pub fn update_ui(&mut self, data: &[u8]) {
-        self.presented = false;
         let (w, h) = (self.ui.w, self.ui.h);
         self.write(&self.ui.tex, [0, 0, w, h], data);
         self.ui_written = true;
@@ -783,10 +733,6 @@ impl Gfx {
         ([x, y, x + pw, y + ph], [x + pad_x, y + pad_y, bw as f32, bh as f32])
     }
 
-    pub fn can_hold_frame(&self, sel: Option<[f32; 4]>) -> bool {
-        self.presented && self.last_selection == sel && !self.is_lost() && !self.ui_animating()
-    }
-
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
     }
@@ -797,7 +743,6 @@ impl Gfx {
     }
 
     pub fn release(&mut self) {
-        self.presented = false;
         self.bind_group = None;
         self.frame = None;
         self.layer_origin = None;
@@ -886,10 +831,8 @@ impl Gfx {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Lost => {
-                self.presented = false;
                 self.surface_losses += 1;
                 if self.surface_losses > SURFACE_RETRIES {
-                    crate::log("gpu surface lost again and again");
                     self.lost.store(true, Ordering::Relaxed);
                     return false;
                 }
@@ -899,15 +842,13 @@ impl Gfx {
                         self.surface.configure(&self.device, &self.config);
                         return true;
                     }
-                    Err(e) => {
-                        crate::log(&format!("gpu surface lost, not made again: {e}"));
+                    Err(_) => {
                         self.lost.store(true, Ordering::Relaxed);
                         return false;
                     }
                 }
             }
             _ => {
-                self.presented = false;
                 self.surface.configure(&self.device, &self.config);
                 return true;
             }
@@ -916,8 +857,6 @@ impl Gfx {
         let view = frame.texture.create_view(&Default::default());
         self.render(&view);
         self.queue.present(frame);
-        self.presented = true;
-        self.last_selection = sel;
         false
     }
 }

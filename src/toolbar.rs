@@ -2,7 +2,7 @@ use crate::annot::{PALETTE, Style, Tool};
 use crate::menu::paint;
 use tiny_skia::{BlendMode, Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder, Pixmap, Point, SpreadMode, Stroke, StrokeDash, Transform};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Item {
     Tool(Tool),
     Undo,

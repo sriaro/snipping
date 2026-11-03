@@ -77,7 +77,6 @@ pub enum Wd {
     Defaults,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Effect {
     AddFiles,
     ChooseFolder,
@@ -89,7 +88,6 @@ pub enum Effect {
     Close,
 }
 
-#[derive(Clone, Debug)]
 pub enum Status {
     Waiting,
     Done(PathBuf),
@@ -106,7 +104,6 @@ pub struct FileRow {
     pub slot: Option<usize>,
 }
 
-#[derive(Clone, Default)]
 pub struct LineEdit {
     pub text: String,
     pub caret: usize,
@@ -193,7 +190,6 @@ impl LineEdit {
     }
 }
 
-#[derive(Clone)]
 pub enum Ctl {
     Chip(String),
     Drop(String),

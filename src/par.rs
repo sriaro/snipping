@@ -200,6 +200,27 @@ pub fn rows<T: Send>(data: &mut [T], row_len: usize, f: impl Fn(usize, &mut [T])
     share(t - 1, &work, &spawn);
 }
 
+pub fn bands<T: Send>(data: &mut [T], band_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    if band_len == 0 || data.is_empty() {
+        return;
+    }
+    let n = data.len().div_ceil(band_len);
+    let t = workers().min(n);
+    if t <= 1 || std::mem::size_of_val(data) < MIN_PARALLEL_BYTES {
+        for (i, band) in data.chunks_mut(band_len).enumerate() {
+            f(i, band);
+        }
+        return;
+    }
+    let queue = Mutex::new(data.chunks_mut(band_len).enumerate());
+    let work = || {
+        while let Some((i, band)) = queue.lock().ok().and_then(|mut q| q.next()) {
+            f(i, band);
+        }
+    };
+    share(t - 1, &work, &spawn);
+}
+
 pub fn ranges<R: Send>(n: usize, min_per_thread: usize, f: impl Fn(std::ops::Range<usize>) -> R + Sync) -> Vec<R> {
     let t = workers().min(n.div_ceil(min_per_thread.max(1))).max(1);
     if t == 1 {

@@ -30,7 +30,7 @@ use windows::{
     core::w,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(PartialEq)]
 pub enum Ev {
     Begin,
     TooSmall(u32, u32),
@@ -43,7 +43,7 @@ pub enum Ev {
     Change(Settings),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(PartialEq)]
 enum Phase {
     Ready,
     Countdown,
@@ -51,7 +51,7 @@ enum Phase {
     Paused,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 enum Chip {
     Format,
     Fps,
@@ -61,7 +61,7 @@ enum Chip {
     More,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 enum Item {
     Record,
     Stop,

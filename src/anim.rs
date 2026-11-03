@@ -64,7 +64,6 @@ impl<'s> Held<'s> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Sniff {
     Gif,
     Webp,
@@ -203,7 +202,6 @@ const GIF_BLOCK_BUDGET: u32 = 1_000_000;
 
 const GIF_SCAN_BYTES: u64 = 16 << 20;
 
-#[derive(Clone, Copy)]
 struct Budget {
     blocks: u32,
     bytes: u64,
@@ -382,7 +380,7 @@ pub fn decode(path: &Path, sink: &mut dyn Sink, stop: &Stop) -> Result<bool> {
 }
 
 pub(crate) fn decode_here(path: &Path, sink: &mut dyn Sink) -> Result<bool> {
-    let read = || std::fs::read(path).with_context(|| format!("can't read {}", path.display()));
+    let read = || crate::convert::read_image_bytes(path);
     match sniff(path) {
         Some(Sniff::Gif) => gif(path, sink),
         Some(Sniff::Webp) => webp(&read()?, sink),

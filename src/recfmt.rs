@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Settings {
     pub webp: bool,
     pub mp4: bool,
@@ -136,7 +136,6 @@ impl Settings {
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
 pub enum Flow {
     Continue,
     Full,

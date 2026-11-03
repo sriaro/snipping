@@ -66,7 +66,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy},
     keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
     platform::windows::{EventLoopBuilderExtWindows, WindowAttributesExtWindows},
     window::{CursorIcon, Window, WindowId, WindowLevel},
@@ -146,7 +146,6 @@ impl Drop for ShotDone {
     }
 }
 
-#[derive(Clone, Copy)]
 enum Sel {
     None,
     Dragging { from: (f32, f32), to: (f32, f32) },
@@ -391,6 +390,7 @@ struct App {
     writing: u32,
     quit_by: Option<Instant>,
     converting: Vec<Arc<convert::Progress>>,
+    estimating: bool,
     hotkey_mgr: Option<GlobalHotKeyManager>,
     _tray: Option<TrayIcon>,
     tray_check: Option<(Instant, usize)>,
@@ -417,7 +417,7 @@ fn inside(r: [f32; 4], p: (f32, f32)) -> bool {
     p.0 >= r[0] && p.0 <= r[2] && p.1 >= r[1] && p.1 <= r[3]
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 struct Grip {
     l: bool,
     t: bool,
@@ -592,7 +592,6 @@ impl App {
                         self.recorder = Some(r);
                     }
                     Err(e) => {
-                        log(&format!("record: {e:#}"));
                         recbar::close();
                         record_failed(&format!("{e:#}"), None);
                     }
@@ -632,9 +631,7 @@ impl App {
                 if let Some(w) = &self.settings {
                     w.window.request_redraw();
                 }
-                if let Err(e) = self.config.save() {
-                    log(&format!("config save: {e:#}"));
-                }
+                let _ = self.config.save();
             }
         }
     }
@@ -650,8 +647,7 @@ impl App {
         };
         let start = match gfx::Gfx::begin(window) {
             Ok(s) => s,
-            Err(e) => {
-                log(&format!("gpu warm-up failed: {e:#}"));
+            Err(_) => {
                 self.capture_warmup.failed(Instant::now());
                 return;
             }
@@ -672,20 +668,12 @@ impl App {
         match result {
             Ok(Ok(mut g)) if self.gfx.is_none() => {
                 g.set_text(self.text.clone());
-                log(&format!("gpu {} warmed up", g.adapter_name));
                 self.gfx = Some(g);
                 if self.session.is_none() {
                     self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
                 }
             }
-            Ok(Err(e)) => {
-                log(&format!("gpu warm-up failed: {e:#}"));
-                self.capture_warmup.failed(Instant::now());
-            }
-            Err(_) => {
-                log("gpu warm-up worker stopped before producing a renderer");
-                self.capture_warmup.failed(Instant::now());
-            }
+            Ok(Err(_)) | Err(_) => self.capture_warmup.failed(Instant::now()),
             _ => {}
         }
         if !wait && self.idle_before_first_capture() {
@@ -730,7 +718,6 @@ impl App {
             Ok(p) => record::keep(&p).unwrap_or(p),
             Err(_) if discard => return,
             Err(e) => {
-                log(&format!("record: {e}"));
                 if quiet {
                     return;
                 }
@@ -806,9 +793,7 @@ impl App {
     }
 
     fn hide_while_quitting(&mut self) {
-        if !mark_quitting(QUITTING) {
-            log("quitting mark unavailable");
-        }
+        mark_quitting(QUITTING);
         self.tray_check = None;
         TRAY_HWND.store(0, std::sync::atomic::Ordering::Relaxed);
         self._tray = None;
@@ -843,6 +828,15 @@ impl App {
         }
     }
 
+    fn take_foreground(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        if let Some(h) = self.window.as_ref().and_then(|w| hwnd_of(w)) {
+            unsafe {
+                let _ = SetForegroundWindow(h);
+            }
+        }
+    }
+
     fn write_shot(&mut self, target: SaveTarget, params: convert::Params, w: u32, h: u32, px: Vec<u8>) {
         self.writing += 1;
         write_in_background(target, params, w, h, px, ShotDone(self.proxy.clone()));
@@ -851,7 +845,6 @@ impl App {
     fn start_capture(&mut self, copy_on_select: bool, record: bool) {
         self.save_redraw_until = None;
         if self.gfx.as_ref().is_some_and(|g| g.probe_lost()) {
-            log("gpu device lost; recreating the renderer");
             self.gfx = None;
         }
         let Some(window) = self.window.clone() else {
@@ -869,8 +862,7 @@ impl App {
         }
         let frame = match capture::capture_virtual_screen() {
             Ok(f) => f,
-            Err(e) => {
-                log(&format!("capture failed: {e:#}"));
+            Err(_) => {
                 self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
                 beep();
                 return;
@@ -882,15 +874,12 @@ impl App {
         let windows = snap::collect((frame.x, frame.y, frame.w as i32, frame.h as i32), hwnd_of(&window));
         self.adopt_warm_gpu(true);
         if self.gfx.is_none() {
-            let started = Instant::now();
             match gfx::Gfx::new(window.clone()) {
                 Ok(mut g) => {
                     g.set_text(self.text.clone());
-                    log(&format!("gpu {} created in {} ms", g.adapter_name, started.elapsed().as_millis()));
                     self.gfx = Some(g);
                 }
-                Err(e) => {
-                    log(&format!("gpu init failed: {e:#}"));
+                Err(_) => {
                     self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
                     beep();
                     return;
@@ -899,8 +888,7 @@ impl App {
         }
         let Some(gfx) = &mut self.gfx else { return };
         let window = &window;
-        if let Err(e) = gfx.set_frame(frame.w, frame.h, frame.bgra()) {
-            log(&format!("upload failed: {e:#}"));
+        if gfx.set_frame(frame.w, frame.h, frame.bgra()).is_err() {
             self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
             beep();
             return;
@@ -1119,11 +1107,9 @@ impl App {
         let job = self.shaper_job.get_or_insert_with(|| std::thread::spawn(FontSystem::new));
         if (block || job.is_finished())
             && let Some(job) = self.shaper_job.take()
+            && let Ok(fs) = job.join()
         {
-            match job.join() {
-                Ok(fs) => self.shaper = Some(Rc::new(RefCell::new(Shaper::new(fs)))),
-                Err(_) => log("font system failed to load"),
-            }
+            self.shaper = Some(Rc::new(RefCell::new(Shaper::new(fs))));
         }
     }
 
@@ -1509,9 +1495,7 @@ impl App {
             return;
         }
         self.config.colors[tool] = v;
-        if let Err(e) = self.config.save() {
-            log(&format!("config save: {e:#}"));
-        }
+        let _ = self.config.save();
     }
 
     fn on_item(&mut self, item: Item) {
@@ -1615,7 +1599,6 @@ impl App {
             let Err(e) = app_pins::put_picture_on_clipboard(w, h, &px) else {
                 return;
             };
-            log(&format!("clipboard failed: {e}"));
             beep();
             let pinned = if pin::size_ok(w, h) {
                 proxy.send_event(UserEvent::CopyFailed(PendingPin { rgba: px, w, h, place: pin::Place::At(x, y) })).is_ok()
@@ -1697,17 +1680,14 @@ impl App {
         let text = loupe::color_text([b[i + 2], b[i + 1], b[i]], s.hex_mode);
         match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
             Ok(()) => s.color_copied = true,
-            Err(e) => {
-                log(&format!("copy color: {e}"));
-                beep();
-            }
+            Err(_) => beep(),
         }
         self.request_redraw();
     }
 
     fn redraw(&mut self) {
         let now = Instant::now();
-        let pulsing = self.save_redraw_until.is_some_and(|until| now < until);
+        let pulsing = self.pending_save.is_some() || self.save_redraw_until.is_some_and(|until| now < until);
         if !pulsing {
             self.save_redraw_until = None;
         }
@@ -1718,9 +1698,6 @@ impl App {
             g.set_light(!s.dark);
         }
         let rect = self.current_rect();
-        if !pulsing && self.pending_save.is_some() && self.gfx.as_ref().is_some_and(|g| g.can_hold_frame(rect)) {
-            return;
-        }
         let retry = self.gfx.as_mut().is_some_and(|g| g.draw(rect));
         if self.gfx.as_ref().is_some_and(|g| g.is_lost()) {
             self.gfx = None;
@@ -2176,22 +2153,19 @@ fn save_waiting() {
 fn store_recording(tmp: &Path, dest: Result<PathBuf, String>, stem: &str, ext: &str, quiet: bool) -> Option<String> {
     let mut rec = tmp.to_path_buf();
     let moved = dest.and_then(|p| record::move_file(&mut rec, &p).map_err(|e| format!("{}: {e}", p.display())));
-    let Err(e) = moved else { return None };
-    log(&format!("save recording: {e}"));
+    let Err(_) = moved else { return None };
     if !quiet && !session::ending() {
         beep();
     }
     Some(match record::claim_name(&config::default_save_dir(), stem, ext).and_then(|p| record::move_file(&mut rec, &p).map(|()| p)) {
         Ok(p) => {
-            log(&format!("recording saved to {} instead", p.display()));
             format!("Snipping couldn't save the recording where you asked.\n\nIt was saved here instead:\n\n{}", p.display())
         }
-        Err(e) => {
+        Err(_) => {
             let (kept, note) = match record::keep(&rec) {
                 Ok(kept) => (kept, ""),
                 Err(_) => (rec, "\n\nCopy it soon: Snipping clears such files out."),
             };
-            log(&format!("recording kept at {}: {e}", kept.display()));
             format!("Snipping couldn't save the recording.\n\nIt is at:\n\n{}{note}", kept.display())
         }
     })
@@ -2228,10 +2202,7 @@ impl ApplicationHandler<UserEvent> for App {
             app_window_attributes().with_title("Snipping").with_decorations(false).with_resizable(false).with_visible(false).with_skip_taskbar(true).with_window_level(WindowLevel::AlwaysOnTop);
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
-            Err(e) => {
-                log(&format!("window: {e}"));
-                return el.exit();
-            }
+            Err(_) => return el.exit(),
         };
         set_window_class_icon(&window);
         disable_window_transitions(&window);
@@ -2248,10 +2219,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }));
                 self.register_hotkeys()
             }
-            Err(e) => {
-                log(&format!("hotkey manager: {e}"));
-                Vec::new()
-            }
+            Err(_) => Vec::new(),
         };
 
         for (id, action) in [
@@ -2291,13 +2259,10 @@ impl ApplicationHandler<UserEvent> for App {
                 _ => {}
             }
         }));
-        match TrayIconBuilder::new().with_tooltip("Snipping").with_icon(tray_icon_image()).build() {
-            Ok(t) => {
-                TRAY_HWND.store(t.window_handle() as isize, std::sync::atomic::Ordering::Relaxed);
-                self.tray_check = Some((Instant::now() + TRAY_CHECKS[0], 0));
-                self._tray = Some(t);
-            }
-            Err(e) => log(&format!("tray: {e}")),
+        if let Ok(t) = TrayIconBuilder::new().with_tooltip("Snipping").with_icon(tray_icon_image()).build() {
+            TRAY_HWND.store(t.window_handle() as isize, std::sync::atomic::Ordering::Relaxed);
+            self.tray_check = Some((Instant::now() + TRAY_CHECKS[0], 0));
+            self._tray = Some(t);
         }
 
         self.text = Text::load();
@@ -2306,9 +2271,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.convert_from_args(el);
 
-        if let Err(e) = shell_menu::sync(self.config.shell_menu) {
-            log(&format!("explorer menu: {e:#}"));
-        }
+        let _ = shell_menu::sync(self.config.shell_menu);
         mem::trim();
     }
 
@@ -2329,7 +2292,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.shaper = None;
                 self.shaper_job = None;
                 mem::trim();
-                log("gpu released after idle");
             } else {
                 wake = Some(deadline);
             }
@@ -2439,15 +2401,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     Ok(None) => {
                         drop(p);
+                        self.take_foreground();
                         let now = Instant::now();
                         if self.save_redraw_until.is_none_or(|until| now >= until) {
                             self.save_redraw_until = Some(now + Duration::from_millis(300));
                         }
                         self.request_redraw();
                     }
-                    Err(e) => {
+                    Err(_) => {
+                        self.take_foreground();
                         self.request_redraw();
-                        log(&format!("save dialog: {e}"));
                         beep();
                     }
                 }
@@ -2495,8 +2458,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Focused(false) => {
-                if self.session.is_some() && !foreground_is_ours() {
-                    log("overlay lost focus to another application; cancelling the capture");
+                if self.session.is_some() && self.pending_save.is_none() && !foreground_is_ours() {
                     self.end_capture();
                 }
             }
@@ -2509,21 +2471,24 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
                 self.on_move();
+                if self.session.is_some() {
+                    self.request_redraw();
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
-                if let Some(s) = self.session.as_mut() {
-                    if let (Some(t), true) = (s.tool, dy != 0.0 && s.edit.is_none()) {
-                        let st = &mut s.styles[t.index()];
-                        if st.uses_size(t) {
-                            st.width = (st.width as i32 + dy.signum() as i32).clamp(1, 12) as u32;
-                            self.rerender_ui();
-                            self.resize_live_text();
-                            self.restyle_selected();
-                        }
+                if let Some(s) = self.session.as_mut()
+                    && let (Some(t), true) = (s.tool, dy != 0.0 && s.edit.is_none())
+                {
+                    let st = &mut s.styles[t.index()];
+                    if st.uses_size(t) {
+                        st.width = (st.width as i32 + dy.signum() as i32).clamp(1, 12) as u32;
+                        self.rerender_ui();
+                        self.resize_live_text();
+                        self.restyle_selected();
                     }
                 }
             }
@@ -2623,9 +2588,7 @@ fn set_window_class_icon(window: &Window) {
         core::PCWSTR,
     };
     let Some(hwnd) = hwnd_of(window) else { return };
-    if let Err(error) = window_identity::attach(hwnd) {
-        log(&format!("window identity: {error:#}"));
-    }
+    let _ = window_identity::attach(hwnd);
     unsafe {
         let Ok(module) = GetModuleHandleW(None) else {
             return;
@@ -2659,20 +2622,15 @@ fn register_app_user_model_id() {
         RegCreateKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None)
     }
     .ok();
-    if let Err(error) = created {
-        log(&format!("app id key: {error}"));
+    if created.is_err() {
         return;
     }
     let set = |name: PCWSTR, value: &str| -> windows::core::Result<()> {
         let bytes: Vec<u8> = wide(value).iter().flat_map(|unit| unit.to_le_bytes()).collect();
         unsafe { RegSetValueExW(key, name, None, REG_SZ, Some(&bytes)) }.ok()
     };
-    if let Err(error) = set(w!("DisplayName"), "Snipping") {
-        log(&format!("app id name: {error}"));
-    }
-    if let Err(error) = set(w!("IconUri"), &exe.display().to_string()) {
-        log(&format!("app id icon: {error}"));
-    }
+    let _ = set(w!("DisplayName"), "Snipping");
+    let _ = set(w!("IconUri"), &exe.display().to_string());
     unsafe {
         let _ = RegCloseKey(key);
     }
@@ -2680,20 +2638,6 @@ fn register_app_user_model_id() {
 
 fn tray_icon_image() -> Icon {
     Icon::from_rgba(icon::render_rgba(32), 32, 32).expect("valid icon")
-}
-
-fn log(msg: &str) {
-    #[cfg(debug_assertions)]
-    {
-        use windows::{Win32::System::Diagnostics::Debug::OutputDebugStringW, core::PCWSTR};
-        let wide = wide(&format!(
-            "Snipping: {msg}
-"
-        ));
-        unsafe { OutputDebugStringW(PCWSTR(wide.as_ptr())) };
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = msg;
 }
 
 pub(crate) fn wide(s: &str) -> Vec<u16> {
@@ -2777,8 +2721,7 @@ fn write_in_background(mut target: SaveTarget, params: convert::Params, w: u32, 
         let mut ext = params.kind.ext();
         let bytes = match convert::encode(&params, w, h, &rgba) {
             Ok(b) => b,
-            Err(e) => {
-                log(&format!("{} encode: {e:#}", ext));
+            Err(_) => {
                 beep();
                 match encode_png(w, h, &rgba) {
                     Ok(b) => {
@@ -2788,7 +2731,7 @@ fn write_in_background(mut target: SaveTarget, params: convert::Params, w: u32, 
                         ext = "png";
                         b
                     }
-                    Err(e) => return log(&format!("png encode: {e}")),
+                    Err(_) => return,
                 }
             }
         };
@@ -2802,22 +2745,12 @@ fn write_in_background(mut target: SaveTarget, params: convert::Params, w: u32, 
             }
         };
         let Err(e) = result else { return };
-        log(&format!("save to {wanted}: {e}"));
         beep();
         let fallback = config::default_save_dir();
         let saved = if matches!(&target, SaveTarget::Folder { dir, .. } if *dir == fallback) {
             None
         } else {
-            match write_new(&fallback, &stem, ext, &bytes) {
-                Ok(p) => {
-                    log(&format!("saved to {} instead", p.display()));
-                    Some(p)
-                }
-                Err(e) => {
-                    log(&format!("fallback save to {} failed too: {e}", fallback.display()));
-                    None
-                }
-            }
+            write_new(&fallback, &stem, ext, &bytes).ok()
         };
         drop(done);
         convert::message_box(&save_failure_text(&wanted, &e, saved.as_deref()));
@@ -2960,7 +2893,6 @@ fn acquire_single_instance() -> Option<isize> {
         let mut waits = 0;
         let mutex = loop {
             let Ok(mutex) = CreateMutexW(None, false, w!("Local\\snipping-single-instance")) else {
-                log("single-instance mutex unavailable; running without the guard");
                 return Some(0);
             };
             if GetLastError() != ERROR_ALREADY_EXISTS {
@@ -3015,12 +2947,10 @@ fn quitting_mark(name: windows::core::PCWSTR) -> Option<QuitMark> {
     }
 }
 
-fn mark_quitting(name: windows::core::PCWSTR) -> bool {
-    let Some(mark) = quitting_mark(name) else {
-        return false;
-    };
-    std::mem::forget(mark);
-    true
+fn mark_quitting(name: windows::core::PCWSTR) {
+    if let Some(mark) = quitting_mark(name) {
+        std::mem::forget(mark);
+    }
 }
 
 fn wait_for_quitting(name: windows::core::PCWSTR, limit_ms: u32) -> bool {
@@ -3074,7 +3004,7 @@ fn harden_dll_search() {
 fn main() -> Result<()> {
     harden_dll_search();
     mem::init();
-    std::panic::set_hook(Box::new(|info| log(&format!("panic: {info}"))));
+    std::panic::set_hook(Box::new(|_| {}));
     if let Some(code) = convert::run_decode_helper(&std::env::args_os().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
@@ -3089,9 +3019,7 @@ fn main() -> Result<()> {
     let Some(relaunch_event) = acquire_single_instance() else {
         return Ok(());
     };
-    if let Err(error) = shell_pkg::ensure_package_assets() {
-        log(&format!("shell assets: {error:#}"));
-    }
+    let _ = shell_pkg::ensure_package_assets();
     let config = Config::load();
     shell_pkg::prepare_package(config.shell_menu == config::SHELL_MODERN);
     std::thread::spawn(record::clean_stale);
@@ -3136,6 +3064,7 @@ fn main() -> Result<()> {
     };
     session::watch(recordings_unsaved, end, save_waiting);
     event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop.listen_device_events(DeviceEvents::Never);
     let mut app = App {
         proxy: event_loop.create_proxy(),
         window: None,
@@ -3173,6 +3102,7 @@ fn main() -> Result<()> {
         writing: 0,
         quit_by: None,
         converting: Vec::new(),
+        estimating: false,
         hotkey_mgr: None,
         session: None,
         cursor: (0.0, 0.0),

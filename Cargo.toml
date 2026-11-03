@@ -1,6 +1,6 @@
 [package]
 name = "snipping"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Screenshot, annotation, recording and conversion tool for Windows"
@@ -9,6 +9,8 @@ repository = "https://github.com/sriaro/snipping"
 [[bin]]
 name = "Snipping"
 path = "src/main.rs"
+test = false
+bench = false
 
 [dependencies]
 anyhow = "1.0.104"

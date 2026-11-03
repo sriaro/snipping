@@ -106,7 +106,6 @@ fn shade(p: &[u8], x: usize, y: usize) -> u32 {
     mix(r) << 16 | mix(g) << 8 | mix(b)
 }
 
-#[derive(Clone, Copy)]
 pub enum Place {
     At(i32, i32),
     Around(i32, i32),
@@ -119,7 +118,7 @@ pub struct PendingPin {
     pub place: Place,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 pub enum PinCmd {
     Copy,
     SaveAs,

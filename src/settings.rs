@@ -113,7 +113,7 @@ const MQ_SPEED: f32 = 34.0;
 const MQ_HOLD: f32 = 1.0;
 const MQ_FRAME_MS: u64 = 33;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Hit {
     Close,
     Tab(usize),
@@ -541,8 +541,7 @@ impl Knob {
 impl SettingsWindow {
     fn page_at_rest(&self, now: Instant, s: f32) -> bool {
         let (fade_in, rise) = self.pages.look(self.tab, now);
-        let rest = fade_in >= 1.0 && (rise * s).round() == 0.0 && (0..TABS.len()).filter(|k| *k != self.tab).all(|k| self.pages.look(k, now).0 <= 0.0);
-        rest
+        fade_in >= 1.0 && (rise * s).round() == 0.0 && (0..TABS.len()).filter(|k| *k != self.tab).all(|k| self.pages.look(k, now).0 <= 0.0)
     }
 
     pub fn say(&mut self, text: &str, is_error: bool) {
@@ -622,7 +621,6 @@ fn overdue(at: Instant, now: Instant, answered: &mut Option<Instant>) -> bool {
     true
 }
 
-#[derive(Clone, Copy)]
 struct Pages {
     fade: [Tween; TABS.len()],
     rise: [Tween; TABS.len()],
@@ -679,14 +677,13 @@ impl HoverFades {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
 enum Damage {
     Whole,
     Part([i32; 4]),
     Nothing,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum LiveId {
     Tabs,
     Close,
@@ -696,7 +693,6 @@ enum LiveId {
     Status,
 }
 
-#[derive(Clone)]
 struct Live {
     id: LiveId,
     area: [i32; 4],
@@ -772,7 +768,6 @@ impl View {
     }
 }
 
-#[derive(Clone, Copy)]
 struct Sig(u64);
 
 impl Sig {
@@ -950,7 +945,6 @@ pub(crate) struct FrameClock {
     due: Option<Instant>,
 }
 
-#[derive(Debug, PartialEq)]
 pub(crate) enum Wake {
     Idle,
     At(Instant),

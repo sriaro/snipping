@@ -189,23 +189,9 @@ pub fn start(area: [i32; 4], settings: Settings, done: impl FnOnce(Result<PathBu
     Ok(Recorder { stop, paused, full, grab })
 }
 
-trait Encode {
-    fn frame(&mut self, at: Instant, bgra: &mut [u8]) -> Result<crate::recfmt::Flow>;
-    fn finish(self) -> Result<()>;
-}
-
-impl Encode for crate::recfmt::Pipeline {
-    fn frame(&mut self, at: Instant, bgra: &mut [u8]) -> Result<crate::recfmt::Flow> {
-        crate::recfmt::Pipeline::frame(self, at, bgra)
-    }
-
-    fn finish(self) -> Result<()> {
-        crate::recfmt::Pipeline::finish(self)
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 fn run_encoder(
-    mut pipeline: impl Encode,
+    mut pipeline: crate::recfmt::Pipeline,
     rx: mpsc::Receiver<Picture>,
     back: &mpsc::SyncSender<Vec<u8>>,
     queued: &AtomicUsize,
@@ -254,7 +240,6 @@ fn run_encoder(
 }
 
 fn tell_cut_short(why: &str) {
-    crate::log(&format!("record: ended early: {why}"));
     if crate::session::ending() {
         return;
     }
@@ -468,14 +453,14 @@ pub fn move_file(rec: &mut PathBuf, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(&*rec, to).is_ok() {
         return Ok(());
     }
-    copy_file(rec, to, std::convert::identity)
+    copy_file(rec, to)
 }
 
-fn copy_file<R: std::io::Read>(rec: &mut PathBuf, to: &Path, read: impl FnOnce(File) -> R) -> std::io::Result<()> {
+fn copy_file(rec: &mut PathBuf, to: &Path) -> std::io::Result<()> {
     if let Ok(kept) = keep(rec) {
         *rec = kept;
     }
-    let copied = File::open(&*rec).and_then(|f| crate::convert::copy_atomic(read(f), to));
+    let copied = File::open(&*rec).and_then(|f| crate::convert::copy_atomic(f, to));
     if let Err(e) = copied {
         if std::fs::metadata(to).is_ok_and(|m| m.len() == 0) {
             let _ = std::fs::remove_file(to);

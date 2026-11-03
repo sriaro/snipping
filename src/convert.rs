@@ -32,7 +32,7 @@ fn guarded<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| Err(anyhow!("{what} failed (internal error)")))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
     Png,
     Jpeg,
@@ -85,14 +85,14 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum PngLevel {
     Fast,
     Default,
     Best,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum ResizeFilter {
     Lanczos,
     CatmullRom,
@@ -100,14 +100,14 @@ pub enum ResizeFilter {
     Nearest,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum ResizeMode {
     Percent(f32),
     Fit(u32, u32),
     Exact(u32, u32),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub struct Params {
     pub kind: Kind,
     pub lossless: bool,
@@ -341,7 +341,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
 
 pub fn decode_srgb(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     guarded("decoding", || {
-        let pic = decode_unguarded(path)?;
+        let pic = decode_unguarded(path, &|| false)?;
         Ok(match (pic.px, pic.icc) {
             (Decoded::Eight(px, w, h), Some(icc)) => match crate::color::to_srgb_8(&px, w, &icc) {
                 Ok(converted) => (converted, w, h),
@@ -357,10 +357,10 @@ pub fn decode_srgb(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
 }
 
 pub fn decode_picture(path: &Path) -> Result<Picture> {
-    guarded("decoding", || decode_unguarded(path))
+    guarded("decoding", || decode_unguarded(path, &|| false))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 enum Reader {
     Webp,
     Raw,
@@ -429,16 +429,22 @@ fn pick_reader(path: &Path) -> Result<Reader> {
     Ok(Reader::Image)
 }
 
+pub(crate) fn read_image_bytes(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).with_context(|| format!("can't read {}", path.display()))?;
+    if file.metadata()?.len() > MAX_FILE_BYTES {
+        bail!("the file is too large to open");
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).with_context(|| format!("can't read {}", path.display()))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        bail!("the file is too large to open");
+    }
+    Ok(bytes)
+}
+
 fn run_reader(reader: Reader, path: &Path) -> Result<Picture> {
-    let bytes = || -> Result<Vec<u8>> {
-        use std::io::Read;
-        let mut b = Vec::new();
-        std::fs::File::open(path).and_then(|f| f.take(MAX_FILE_BYTES + 1).read_to_end(&mut b)).with_context(|| format!("can't read {}", path.display()))?;
-        if b.len() as u64 > MAX_FILE_BYTES {
-            bail!("the file is too large to open");
-        }
-        Ok(b)
-    };
+    let bytes = || read_image_bytes(path);
     match reader {
         Reader::Webp => decode_webp(&bytes()?),
         Reader::Raw => Ok(plain(eight(crate::readers::raw(path))?)),
@@ -452,12 +458,18 @@ fn run_reader(reader: Reader, path: &Path) -> Result<Picture> {
     }
 }
 
-fn decode_unguarded(path: &Path) -> Result<Picture> {
+fn check_cancelled(stop: &Stop) -> Result<()> {
+    if stop() { Err(crate::anim::Stopped.into()) } else { Ok(()) }
+}
+
+fn decode_unguarded(path: &Path, stop: &Stop) -> Result<Picture> {
+    check_cancelled(stop)?;
     let reader = pick_reader(path)?;
-    if reader.isolated() && !IN_HELPER.load(Ordering::Relaxed) && !cfg!(test) {
-        return decode_in_helper(path);
+    if reader.isolated() && !IN_HELPER.load(Ordering::Relaxed) {
+        return decode_in_helper(path, stop);
     }
     let mut pic = run_reader(reader, path)?;
+    check_cancelled(stop)?;
     pic.icc = crate::color::usable(pic.icc.take());
     Ok(pic)
 }
@@ -636,9 +648,6 @@ fn read_answer<R: std::io::Read>(out: &mut R, anim: Option<&mut dyn crate::anim:
             out.read_exact(&mut meta).map_err(|_| crashed())?;
             let mut px = pixel_buffer(w as usize * h as usize * 4, 0u16)?;
             out.read_exact(bytemuck::cast_slice_mut(&mut px)).map_err(|_| crashed())?;
-            if cfg!(target_endian = "big") {
-                px.iter_mut().for_each(|v| *v = u16::from_le(*v));
-            }
             let icc = read_icc(out)?;
             Ok(Helped::Still(Picture { px: Decoded::Deep(crate::deep::from_rgba16(px, w, h, meta[0], meta[1])), icc }))
         }
@@ -677,15 +686,15 @@ fn read_answer<R: std::io::Read>(out: &mut R, anim: Option<&mut dyn crate::anim:
     }
 }
 
-fn decode_in_helper(path: &Path) -> Result<Picture> {
-    match run_helper(path, None, &|| false)? {
+fn decode_in_helper(path: &Path, stop: &Stop) -> Result<Picture> {
+    match run_helper(path, None, stop)? {
         Helped::Still(x) => Ok(x),
         Helped::Anim(_) => bail!("unexpected decoder answer"),
     }
 }
 
 pub(crate) fn decode_animation(path: &Path, sink: &mut dyn crate::anim::Sink, stop: &Stop) -> Result<bool> {
-    if IN_HELPER.load(Ordering::Relaxed) || cfg!(test) {
+    if IN_HELPER.load(Ordering::Relaxed) {
         let len = std::fs::metadata(path)?.len();
         if len > MAX_FILE_BYTES {
             bail!("the file is too large to open ({} MB)", len >> 20);
@@ -811,13 +820,7 @@ pub fn run_decode_helper(args: &[std::ffi::OsString]) -> Option<i32> {
                 out.write_all(&d.w.to_le_bytes())?;
                 out.write_all(&d.h.to_le_bytes())?;
                 out.write_all(&[d.cp, d.tc])?;
-                if cfg!(target_endian = "little") {
-                    out.write_all(bytemuck::cast_slice(&d.px))?;
-                } else {
-                    for v in &d.px {
-                        out.write_all(&v.to_le_bytes())?;
-                    }
-                }
+                out.write_all(bytemuck::cast_slice(&d.px))?;
                 write_icc(&mut out, &icc)
             })(),
             Err(e) => out.write_all(b"ER").and_then(|()| out.write_all(format!("{e:#}").as_bytes())),
@@ -845,7 +848,6 @@ pub(crate) fn image_format_allowed(format: Option<image::ImageFormat>) -> bool {
     matches!(format, Some(Png | Jpeg | Gif | Bmp | Tiff | Ico | WebP))
 }
 
-#[derive(Clone, Copy)]
 struct IcoEntry {
     width: u32,
     height: u32,
@@ -1007,7 +1009,7 @@ fn decode_with_image(path: &Path) -> Result<Picture> {
     if !image_format_allowed(reader.format()) {
         bail!("{} is not a picture format Snipping reads", path.display());
     }
-    if matches!(reader.format(), Some(image::ImageFormat::Ico | image::ImageFormat::Tiff)) && !IN_HELPER.load(Ordering::Relaxed) && !cfg!(test) {
+    if matches!(reader.format(), Some(image::ImageFormat::Ico | image::ImageFormat::Tiff)) && !IN_HELPER.load(Ordering::Relaxed) {
         bail!("can't read {}: the file changed while it was being read", path.display());
     }
     let mut decoder: Box<dyn ImageDecoder> = if reader.format() == Some(image::ImageFormat::Png) {
@@ -1470,14 +1472,13 @@ pub fn with_added_extension(path: &Path, ext: &str) -> PathBuf {
     (0..10_000).map(make).find(|p| !p.exists()).unwrap_or_else(|| make(0))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum IfExists {
     Rename,
     Overwrite,
     Skip,
 }
 
-#[derive(Clone, Debug)]
 pub struct Output {
     pub dir: Option<PathBuf>,
     pub template: String,
@@ -1711,7 +1712,7 @@ fn place_result(dir: &Path, name: &str, if_exists: IfExists, src: &Source, claim
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Outcome {
     Done(PathBuf),
     Kept(PathBuf, &'static str),
@@ -1729,7 +1730,7 @@ fn make_pixel_bytes(src: &Source, p: &Params) -> Result<(u32, u32, Vec<u8>)> {
             return Ok((w, h, out.into_inner()));
         }
     }
-    make_still_bytes(src, p)
+    make_still_bytes(src, p, &|| false)
 }
 
 fn write_animation<'a>(src: &Source, p: &Params, dir: &Path, made: &'a Folders, stop: &Stop) -> Result<Option<(u32, u32, PartFile<'a>)>> {
@@ -1743,11 +1744,13 @@ fn write_animation<'a>(src: &Source, p: &Params, dir: &Path, made: &'a Folders, 
     Ok(crate::anim::convert(path, p, &mut part, stop)?.map(|(w, h)| (w, h, part)))
 }
 
-fn make_still_bytes(src: &Source, p: &Params) -> Result<(u32, u32, Vec<u8>)> {
+fn make_still_bytes(src: &Source, p: &Params, stop: &Stop) -> Result<(u32, u32, Vec<u8>)> {
+    check_cancelled(stop)?;
     let pic = match src {
-        Source::File(path) => decode_picture(path)?,
+        Source::File(path) => guarded("decoding", || decode_unguarded(path, stop))?,
         Source::Pixels { rgba, w, h, .. } => plain(Decoded::Eight((**rgba).clone(), *w, *h)),
     };
+    check_cancelled(stop)?;
     let icc = pic.icc;
     let (rgba, w, h, icc) = match pic.px {
         Decoded::Deep(mut d) if p.deep && crate::deep::can_hold(p.kind) => {
@@ -1756,6 +1759,7 @@ fn make_still_bytes(src: &Source, p: &Params) -> Result<(u32, u32, Vec<u8>)> {
                 Some((mode, filter)) => crate::deep::resize(d, mode, filter)?,
                 None => d,
             };
+            check_cancelled(stop)?;
             let bytes = crate::deep::encode(p, &d)?;
             return Ok((d.w, d.h, bytes));
         }
@@ -1774,13 +1778,13 @@ fn make_still_bytes(src: &Source, p: &Params) -> Result<(u32, u32, Vec<u8>)> {
         None => (rgba, w, h),
     };
     let (rgba, w, h) = if p.kind == Kind::Ico && (w > 256 || h > 256) { resize(rgba, w, h, ResizeMode::Fit(256, 256), ResizeFilter::Lanczos)? } else { (rgba, w, h) };
+    check_cancelled(stop)?;
     let mut no_resize = p.clone();
     no_resize.resize = None;
     let bytes = encode_in_profile(&no_resize, w, h, rgba, icc)?;
     Ok((w, h, bytes))
 }
 
-#[derive(Clone, Debug)]
 pub struct Estimate {
     pub bytes: u64,
     pub original: Option<u64>,
@@ -1859,17 +1863,22 @@ fn estimate_unguarded(src: &Source, p: &Params) -> Result<Estimate> {
 
 pub fn run_one(src: &Source, n: usize, p: &Params, out: &Output, claims: &Claims, stop: &Stop) -> Option<Outcome> {
     let result = guarded("conversion", || {
+        check_cancelled(stop)?;
         let dir = out.dir.clone().or_else(|| src.folder()).unwrap_or_else(|| PathBuf::from("."));
         let written = match write_animation(src, p, &dir, &claims.folders, stop)? {
-            Some((w, h, part)) => place_result(&dir, &output_name(out, src, n, w, h, p.kind.ext()), out.if_exists, src, claims, move |_| part.keep())?,
+            Some((w, h, part)) => {
+                check_cancelled(stop)?;
+                place_result(&dir, &output_name(out, src, n, w, h, p.kind.ext()), out.if_exists, src, claims, move |_| part.keep())?
+            }
             None => {
-                let (w, h, bytes) = make_still_bytes(src, p)?;
+                let (w, h, bytes) = make_still_bytes(src, p, stop)?;
+                check_cancelled(stop)?;
                 write_result(&dir, &output_name(out, src, n, w, h, p.kind.ext()), out.if_exists, &bytes, src, claims)?
             }
         };
         Ok(match written {
             Some(path) => match src {
-                Source::File(orig) if out.delete_original => match recycle_original(orig, &path) {
+                Source::File(orig) if out.delete_original && !stop() => match recycle_original(orig, &path) {
                     Some(why) => Outcome::Kept(path, why),
                     None => Outcome::Done(path),
                 },
@@ -1955,7 +1964,8 @@ impl MemoryGate {
             if *used == 0 || used.saturating_add(weight) <= self.budget {
                 break;
             }
-            used = self.freed.wait(used).unwrap_or_else(|e| e.into_inner());
+            let (next, _) = self.freed.wait_timeout(used, Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner());
+            used = next;
         }
         *used = used.saturating_add(weight);
         Some(Hold(self, weight))
@@ -2181,7 +2191,7 @@ pub fn run_batch(items: Vec<Source>, p: Params, out: Output, threads: usize, pro
     claims.folders.take_back();
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 pub enum Format {
     Png,
     Jpeg(u8),
@@ -2240,8 +2250,7 @@ pub fn convert_in_background(path: PathBuf, format: Format, w: u32, h: u32, rgba
     std::thread::spawn(move || {
         crate::par::lower_priority();
         let result = encode(&format.params(), w, h, &rgba).and_then(|bytes| Ok(write_atomic(&path, &bytes)?));
-        if let Err(e) = result {
-            crate::log(&format!("convert to {} ({}): {e:#}", format.ext(), path.display()));
+        if result.is_err() {
             crate::beep();
         }
     });

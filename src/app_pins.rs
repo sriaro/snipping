@@ -1,5 +1,5 @@
 use crate::{
-    App, MenuAction, Sel, beep, config, dialogs, hwnd_of, log,
+    App, MenuAction, Sel, beep, config, dialogs, hwnd_of,
     pin::{PendingPin, Pin, PinCmd, Place, size_ok, valid_image},
 };
 use crate::{
@@ -56,7 +56,14 @@ fn clipboard_picture() -> Option<(bool, Vec<u8>)> {
             if data.is_null() {
                 return None;
             }
-            let bytes = (len > 0 && len <= MAX_CLIPBOARD_BYTES).then(|| std::slice::from_raw_parts(data, len).to_vec());
+            let bytes = if len > 0 && len <= MAX_CLIPBOARD_BYTES {
+                convert::pixel_capacity(len).ok().map(|mut bytes| {
+                    bytes.extend_from_slice(std::slice::from_raw_parts(data, len));
+                    bytes
+                })
+            } else {
+                None
+            };
             let _ = GlobalUnlock(mem);
             bytes.map(|b| (is_png, b))
         });
@@ -218,7 +225,6 @@ fn clipboard_image() -> Option<(Vec<u8>, u32, u32)> {
     let (is_png, data) = clipboard_picture()?;
     let (rgba, w, h) = decode_clipboard(is_png, data)?;
     if !valid_image(&rgba, w, h) {
-        log(&format!("clipboard image refused: {w} x {h}, {} bytes", rgba.len()));
         return None;
     }
     Some((rgba, w, h))
@@ -231,7 +237,6 @@ impl App {
             return;
         };
         if !size_ok(w, h) {
-            log(&format!("pin selection: too large to pin ({w} x {h})"));
             beep();
             return;
         }
@@ -265,7 +270,6 @@ impl App {
 
     pub(crate) fn pasted_pin(&mut self, image: Option<(Vec<u8>, u32, u32)>, at: (i32, i32)) {
         let Some((rgba, w, h)) = image else {
-            log("paste as pin: no image on the clipboard");
             beep();
             return;
         };
@@ -284,10 +288,7 @@ impl App {
                     }
                     self.pins.push(pin);
                 }
-                Err(e) => {
-                    log(&format!("pin window: {e:#}"));
-                    beep();
-                }
+                Err(_) => beep(),
             }
         }
     }
@@ -423,8 +424,7 @@ impl App {
         let (w, h, px) = self.pins[index].image();
         let px = px.to_vec();
         std::thread::spawn(move || {
-            if let Err(e) = put_picture_on_clipboard(w, h, &px) {
-                log(&format!("copy pin: {e}"));
+            if put_picture_on_clipboard(w, h, &px).is_err() {
                 beep();
             }
         });
@@ -444,7 +444,7 @@ impl App {
             let (mut path, picked) = match dialogs::save_formats(owner, &stem, &listed) {
                 Ok(Some(r)) => r,
                 Ok(None) => return,
-                Err(e) => return log(&format!("save pin dialog: {e:#}")),
+                Err(_) => return,
             };
             let typed = path.extension().and_then(|e| e.to_str()).and_then(Format::from_extension);
             let format = match typed {
@@ -487,15 +487,11 @@ impl App {
         match res {
             Ok(Some((rgba, w, h))) => {
                 if !pin.set_image(rgba, w, h) {
-                    log(&format!("open image: too large to pin ({w} x {h})"));
                     beep();
                 }
             }
             Ok(None) => {}
-            Err(e) => {
-                log(&e);
-                beep();
-            }
+            Err(_) => beep(),
         }
     }
 

@@ -5,7 +5,7 @@ use tiny_skia::{FillRule, LineCap, LineJoin, Path, PathBuilder, Pixmap, Rect, St
 pub type Pt = (f32, f32);
 pub type Color = [u8; 3];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Tool {
     Rect,
     Ellipse,

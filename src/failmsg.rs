@@ -26,7 +26,7 @@ const TAGGED: &[(&str, &str, &str)] = &[
     ("WebP", "partition 0 overflow", "The picture is too detailed for a lossy WebP. Try lossless, or a smaller size"),
 ];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum Where {
     Has,
     Starts,

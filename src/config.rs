@@ -15,7 +15,7 @@ pub const DEFAULT_HOTKEY: &str = "ALT+F1";
 pub const DEFAULT_NESTED_HOTKEY: &str = "ALT+F2";
 pub const DEFAULT_RECORD_HOTKEY: &str = "ALT+F3";
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Action {
     Snip,
     SnipCopy,
@@ -106,7 +106,6 @@ pub fn color_string(color: usize, custom: Option<[u8; 3]>) -> String {
 
 pub const DEFAULT_FILE_NAME: &str = "$yyyy-MM-dd_HH-mm-ss$";
 
-#[derive(Clone, Copy)]
 pub struct Stamp {
     pub year: u16,
     pub month: u16,
@@ -167,6 +166,22 @@ pub fn expand_name(template: &str, t: &Stamp) -> String {
 }
 
 const LOCATION_FILE: &str = "Snipping.location";
+const MAX_SETTINGS_BYTES: u64 = 1 << 20;
+
+fn read_settings(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    let file = std::fs::File::open(path)?;
+    let oversized = || Error::new(ErrorKind::InvalidData, "the settings file is too large");
+    if file.metadata()?.len() > MAX_SETTINGS_BYTES {
+        return Err(oversized());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SETTINGS_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err(oversized());
+    }
+    Ok(bytes)
+}
 
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(PathBuf::from)
@@ -198,7 +213,7 @@ fn writable(dir: &std::path::Path) -> bool {
 }
 
 fn location_at(path: &std::path::Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = String::from_utf8(read_settings(path).ok()?).ok()?;
     let dir = PathBuf::from(text.lines().next()?.trim());
     dir.is_absolute().then_some(dir)
 }
@@ -263,7 +278,7 @@ fn copy_settings_once(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     };
     use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    match std::fs::read(path) {
+    match read_settings(path) {
         Ok(existing) if existing == bytes => return Ok(()),
         Ok(_) => {
             return Err(anyhow!("different settings already exist at {}", path.display()));
@@ -287,7 +302,7 @@ fn copy_settings_once(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         Ok(())
     })();
     let _ = std::fs::remove_file(temporary);
-    if result.is_err() && std::fs::read(path).is_ok_and(|existing| existing == bytes) {
+    if result.is_err() && read_settings(path).is_ok_and(|existing| existing == bytes) {
         return Ok(());
     }
     result
@@ -310,7 +325,7 @@ fn migrate_settings_from(home: &std::path::Path, beside: &std::path::Path, legac
     }
     let pointer = home.join(LOCATION_FILE);
     if pointer.try_exists()? {
-        if std::fs::read(&pointer).is_ok_and(|bytes| bytes.iter().all(u8::is_ascii_whitespace)) {
+        if read_settings(&pointer)?.iter().all(u8::is_ascii_whitespace) {
             let _ = std::fs::remove_file(&pointer);
         }
         return Ok(());
@@ -320,7 +335,7 @@ fn migrate_settings_from(home: &std::path::Path, beside: &std::path::Path, legac
         if !old_pointer.try_exists()? {
             continue;
         }
-        let bytes = std::fs::read(&old_pointer)?;
+        let bytes = read_settings(&old_pointer)?;
         let old_home = old_pointer.parent().ok_or_else(|| anyhow!("no settings folder"))?;
         let folder = legacy.filter(|dir| *dir == old_home);
         if location_at(&old_pointer).as_ref().is_some_and(|dir| settings_folder_allowed(dir, beside)) {
@@ -329,7 +344,7 @@ fn migrate_settings_from(home: &std::path::Path, beside: &std::path::Path, legac
             clean_legacy_file(&old_home.join("config.txt"), folder);
             return Ok(());
         }
-        match std::fs::read(old_home.join("config.txt")) {
+        match read_settings(old_home.join("config.txt")) {
             Ok(settings) => copy_settings_once(&home.join("config.txt"), &settings)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -343,7 +358,7 @@ fn migrate_settings_from(home: &std::path::Path, beside: &std::path::Path, legac
     }
     let sources = [legacy.map(|dir| dir.join("config.txt")), Some(beside.join("config.txt"))];
     for source in sources.into_iter().flatten() {
-        match std::fs::read(&source) {
+        match read_settings(&source) {
             Ok(settings) => {
                 copy_settings_once(&home.join("config.txt"), &settings)?;
                 let folder = legacy.filter(|dir| source.parent() == Some(*dir));
@@ -384,7 +399,7 @@ pub fn saved_theme() -> ThemeMode {
         .filter(|d| !d.join(LOCATION_FILE).exists())
         .and_then(|_| [legacy_appdata_dir().map(|d| d.join(LOCATION_FILE)), exe_dir().map(|d| d.join(LOCATION_FILE))].into_iter().flatten().find_map(|pointer| location_at(&pointer)));
     let places = [custom_dir(), legacy_custom, home].into_iter().flatten().map(|d| d.join("config.txt")).chain(legacy_config_path());
-    let Some(bytes) = places.into_iter().find_map(|p| std::fs::read(p).ok()) else {
+    let Some(bytes) = places.into_iter().find_map(|p| read_settings(p).ok()) else {
         return ThemeMode::System;
     };
     text_of(&bytes).lines().filter_map(|l| l.strip_prefix("theme=").and_then(ThemeMode::parse)).next_back().unwrap_or_default()
@@ -408,11 +423,11 @@ fn legacy_config_path() -> Option<PathBuf> {
 const UNREADABLE: &str = "file or folder was unavailable at start; restart Snipping";
 
 fn read_retrying(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    let mut res = std::fs::read(path);
+    let mut res = read_settings(path);
     for _ in 0..3 {
-        if res.as_ref().is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound) {
+        if res.as_ref().is_err_and(|e| !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData)) {
             std::thread::sleep(std::time::Duration::from_millis(150));
-            res = std::fs::read(path);
+            res = read_settings(path);
         }
     }
     res
@@ -493,7 +508,7 @@ impl Config {
 
     fn read_from(primary: Option<PathBuf>, stranded: Option<PathBuf>, legacy: Option<PathBuf>) -> (Self, bool) {
         if let Some(dir) = stranded {
-            let bytes = std::fs::read(dir.join("config.txt")).ok().or_else(|| primary.and_then(|p| std::fs::read(p).ok()));
+            let bytes = read_settings(dir.join("config.txt")).ok().or_else(|| primary.and_then(|p| read_settings(p).ok()));
             let mut cfg = Self::parse(&bytes.map(|b| text_of(&b)).unwrap_or_default());
             cfg.unreadable = true;
             return (cfg, false);
@@ -504,10 +519,17 @@ impl Config {
             Some(Err(e)) => e.kind() == std::io::ErrorKind::NotFound,
             None => true,
         };
-        let unreadable = matches!(primary, Some(Err(_))) && !first_run;
+        let mut unreadable = matches!(primary, Some(Err(_))) && !first_run;
         let bytes = match primary {
             Some(Ok(b)) => Some(b),
-            _ if first_run => legacy.and_then(|p| std::fs::read(p).ok()),
+            _ if first_run => match legacy.map(read_settings) {
+                Some(Ok(b)) => Some(b),
+                Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+                    unreadable = true;
+                    None
+                }
+                _ => None,
+            },
             _ => None,
         };
         let mut cfg = Self::parse(&bytes.map(|b| text_of(&b)).unwrap_or_default());
@@ -572,8 +594,7 @@ impl Config {
                 if let Ok(q) = v.trim().parse::<u32>() {
                     cfg.quality = QUALITY_STEPS[quality_step(q.clamp(1, 100) as u8)].1;
                 }
-            } else if cfg.rec.parse_line(line) {
-            } else if cfg.convert.parse_line(line) {
+            } else if cfg.rec.parse_line(line) || cfg.convert.parse_line(line) {
             } else if let Some(v) = line.strip_prefix("remember_colors=") {
                 cfg.remember_colors = v.trim() != "0";
             } else if let Some((i, v)) = line.strip_prefix("color.").and_then(|r| r.split_once('=')).and_then(|(i, v)| Some((i.parse::<usize>().ok().filter(|i| *i < 9)?, v))) {
@@ -835,15 +856,13 @@ pub fn set_autostart(on: bool) -> Result<()> {
         let _ = RegCloseKey(key);
     }
     res.map_err(|e| anyhow!("write Run key: {e}"))?;
-    if on {
-        if let Ok(key) = open_key(APPROVED_KEY, KEY_SET_VALUE) {
-            let gone = unsafe { RegDeleteValueW(key, VALUE_NAME) };
-            unsafe {
-                let _ = RegCloseKey(key);
-            }
-            if gone.is_err() && gone != ERROR_FILE_NOT_FOUND {
-                return Err(anyhow!("clear the startup switch: {gone:?}"));
-            }
+    if on && let Ok(key) = open_key(APPROVED_KEY, KEY_SET_VALUE) {
+        let gone = unsafe { RegDeleteValueW(key, VALUE_NAME) };
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+        if gone.is_err() && gone != ERROR_FILE_NOT_FOUND {
+            return Err(anyhow!("clear the startup switch: {gone:?}"));
         }
     }
     Ok(())

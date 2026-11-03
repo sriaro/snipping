@@ -135,10 +135,10 @@ fn makepri() -> PathBuf {
     let target = env::var("TARGET").unwrap();
     for key in [format!("RC_{target}"), format!("RC_{}", target.replace('-', "_")), "RC".to_string()] {
         println!("cargo:rerun-if-env-changed={key}");
-        if let Some(rc) = env::var_os(&key).map(PathBuf::from) {
-            if let Some(tool) = rc.parent().map(|folder| folder.join("makepri.exe")).filter(|tool| tool.is_file()) {
-                return tool;
-            }
+        if let Some(rc) = env::var_os(&key).map(PathBuf::from)
+            && let Some(tool) = rc.parent().map(|folder| folder.join("makepri.exe")).filter(|tool| tool.is_file())
+        {
+            return tool;
         }
     }
     if let Some(tool) = embed_resource::find_windows_sdk_tool("rc.exe").and_then(|rc| rc.parent().map(|folder| folder.join("makepri.exe"))).filter(|tool| tool.is_file()) {

@@ -1,5 +1,14 @@
 use crate::{menu, text::Text};
-use std::{cell::RefCell, ffi::c_void, path::Path, sync::Arc, time::Instant};
+use std::{
+    cell::RefCell,
+    ffi::c_void,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::SeqCst},
+    },
+    time::{Duration, Instant},
+};
 use tiny_skia::{Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Point, SpreadMode, Stroke, Transform};
 use unicode_segmentation::UnicodeSegmentation;
 use windows::{
@@ -18,8 +27,8 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FindWindowExW, FlashWindowEx, GetCursorPos, GetMessageW, GetWindowRect,
-                HICON, HTCAPTION, HTCLIENT, HWND_NOTOPMOST, IDC_ARROW, KillTimer, LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, RegisterClassExW, SPI_GETHIGHCONTRAST,
-                SPI_GETSCREENREADER, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_ACTIVATE,
+                HICON, HTCAPTION, HTCLIENT, HWND_NOTOPMOST, IDC_ARROW, IsWindow, KillTimer, LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostMessageW, RegisterClassExW, SPI_GETHIGHCONTRAST,
+                SPI_GETSCREENREADER, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, USER_TIMER_MINIMUM, WM_ACTIVATE, WM_APP,
                 WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_TIMER,
                 WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
             },
@@ -44,6 +53,7 @@ const BTN_H: f32 = 32.0;
 const FOOT_H: f32 = 64.0;
 const ANIM_MS: f32 = 180.0;
 const ANIM_TIMER: usize = 1;
+const WM_FRAME: u32 = WM_APP + 1;
 const HEAD_LINES: usize = 3;
 const TEXT_LINES: usize = 10;
 const PATH_LINES: usize = 4;
@@ -53,14 +63,14 @@ const MAX_LINE: usize = 2_000;
 const KEY_GRACE_MS: u128 = 350;
 const SCREEN_MARGIN: f32 = 24.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 enum Block {
     Text(String),
     Path(String),
     Row { name: String, why: String },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 struct Notice {
     heading: String,
     blocks: Vec<Block>,
@@ -239,7 +249,7 @@ fn cap_tail(mut lines: Vec<String>, n: usize, t: &Text, px: f32, max_w: f32) -> 
     tail
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy)]
 enum Tone {
     Ink,
     Soft,
@@ -251,7 +261,7 @@ enum Cmd {
     Chip([f32; 4]),
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 enum Act {
     Reveal,
     Copy,
@@ -265,7 +275,7 @@ struct Btn {
     primary: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 enum Hit {
     Close,
     Button(usize),
@@ -525,7 +535,7 @@ fn warning_icon(pix: &mut Pixmap, r: [f32; 4], s: f32, plain: Option<([u8; 3], [
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 struct Contrast {
     back: [u8; 3],
     ink: [u8; 3],
@@ -769,6 +779,7 @@ struct Dlg {
     pic: Option<Pixmap>,
     born: Instant,
     animate: bool,
+    pacer: Option<Arc<Pacer>>,
     placed: bool,
     replace: bool,
     max_h: f32,
@@ -778,6 +789,9 @@ struct Dlg {
 
 impl Drop for Dlg {
     fn drop(&mut self) {
+        if let Some(p) = &self.pacer {
+            p.stop.store(true, SeqCst);
+        }
         unsafe {
             if !self.hwnd.is_invalid() {
                 let _ = DestroyWindow(self.hwnd);
@@ -991,6 +1005,7 @@ fn open(n: &Notice) -> bool {
         pic: None,
         born: Instant::now(),
         animate,
+        pacer: None,
         placed: false,
         replace: false,
         max_h,
@@ -1008,7 +1023,11 @@ fn open(n: &Notice) -> bool {
             let _ = FlashWindowEx(&flash);
         }
         if animate {
-            SetTimer(Some(hwnd), ANIM_TIMER, 15, None);
+            let paced = pace(hwnd);
+            if paced.is_none() {
+                SetTimer(Some(hwnd), ANIM_TIMER, USER_TIMER_MINIMUM, None);
+            }
+            with(|d| d.pacer = paced);
         }
     }
     true
@@ -1091,6 +1110,40 @@ fn redraw() -> bool {
     present()
 }
 
+struct Pacer {
+    hwnd: isize,
+    stop: AtomicBool,
+    waiting: AtomicBool,
+}
+
+fn pace(hwnd: HWND) -> Option<Arc<Pacer>> {
+    let p = Arc::new(Pacer { hwnd: hwnd.0 as isize, stop: AtomicBool::new(false), waiting: AtomicBool::new(false) });
+    let t = p.clone();
+    std::thread::Builder::new().name("message-frames".into()).spawn(move || tick(&t)).ok()?;
+    Some(p)
+}
+
+fn tick(p: &Pacer) {
+    let hwnd = HWND(p.hwnd as *mut c_void);
+    let until = Instant::now() + Duration::from_millis(ANIM_MS as u64) + Duration::from_secs(2);
+    let mut last = None;
+    while !p.stop.load(SeqCst) && Instant::now() < until {
+        crate::settings::wait_frame(&mut last);
+        if p.stop.load(SeqCst) || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return;
+        }
+        if p.waiting.swap(true, SeqCst) {
+            continue;
+        }
+        if unsafe { PostMessageW(Some(hwnd), WM_FRAME, WPARAM(0), LPARAM(0)) }.is_err() {
+            p.waiting.store(false, SeqCst);
+        }
+    }
+    if !p.stop.load(SeqCst) && unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_FRAME, WPARAM(0), LPARAM(0)) };
+    }
+}
+
 fn progress(animate: bool, placed: bool, elapsed_ms: f32) -> f32 {
     if !animate {
         1.0
@@ -1129,6 +1182,14 @@ fn present() -> bool {
         return false;
     };
     let pushed = menu::push(hwnd, dc, 255, place);
+    with(|d| {
+        if let Some(p) = &d.pacer {
+            p.waiting.store(false, SeqCst);
+        }
+        if settled && let Some(p) = d.pacer.take() {
+            p.stop.store(true, SeqCst);
+        }
+    });
     if settled {
         unsafe {
             let _ = KillTimer(Some(hwnd), ANIM_TIMER);
@@ -1326,6 +1387,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             {
                 activate(Hit::Button(i));
             }
+            return LRESULT(0);
+        }
+        WM_FRAME => {
+            present();
             return LRESULT(0);
         }
         WM_TIMER if wp.0 == ANIM_TIMER => {

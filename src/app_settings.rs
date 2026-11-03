@@ -2,7 +2,7 @@ use crate::{
     App, UserEvent, beep, config,
     config::Action,
     convert::Kind,
-    dialogs, hwnd_of, log,
+    dialogs, hwnd_of,
     settings::{Hit, SettingsWindow, View},
     theme::ThemeMode,
 };
@@ -88,8 +88,7 @@ impl App {
             if spec.is_empty() {
                 continue;
             }
-            if let Err(e) = self.register_one(action, &spec) {
-                log(&format!("hotkey {} ({spec}): {e}", action.key()));
+            if self.register_one(action, &spec).is_err() {
                 failed.push(hotkey_taken(&spec, action));
             }
         }
@@ -111,10 +110,7 @@ impl App {
         let action = Action::SnipNested;
         let spec = self.config.hotkeys[action.index()].clone();
         if self.config.nested_capture && !spec.is_empty() {
-            if self.hotkeys[action.index()].is_none()
-                && let Err(e) = self.register_one(action, &spec)
-            {
-                log(&format!("hotkey {} ({spec}): {e}", action.key()));
+            if self.hotkeys[action.index()].is_none() && self.register_one(action, &spec).is_err() {
                 return Err(anyhow!("{} is used by another program", config::pretty_hotkey(&spec)));
             }
         } else {
@@ -161,7 +157,6 @@ impl App {
                             self.hotkeys[i] = Some(o);
                         } else {
                             let old_spec = &self.config.hotkeys[i];
-                            log(&format!("hotkey {} ({old_spec}): taken back by another program", action.key()));
                             return Err(anyhow!("{e}. {}", hotkey_taken(old_spec, action)));
                         }
                     }
@@ -191,7 +186,6 @@ impl App {
                 self.hotkeys[action.index()] = Some(hk);
             } else if except != Some(action) {
                 let spec = &self.config.hotkeys[action.index()];
-                log(&format!("hotkey {} ({spec}): taken while Settings listened", action.key()));
                 failed.push(hotkey_taken(spec, action));
             }
         }
@@ -225,21 +219,18 @@ impl App {
         }
         self.autostart = config::autostart_enabled();
         crate::settings::refresh_motion();
-        match SettingsWindow::new(el, self.config.theme.is_dark(), tab) {
-            Ok(s) => {
-                self.settings = Some(s);
-                self.draw_settings();
-                if let Some(s) = &self.settings {
-                    crate::settings::cloak(&s.window, true);
-                    s.show();
-                }
-                self.draw_settings();
-                if let Some(s) = self.settings.as_mut() {
-                    s.begin_opening();
-                    s.window.focus_window();
-                }
+        if let Ok(s) = SettingsWindow::new(el, self.config.theme.is_dark(), tab) {
+            self.settings = Some(s);
+            self.draw_settings();
+            if let Some(s) = &self.settings {
+                crate::settings::cloak(&s.window, true);
+                s.show();
             }
-            Err(e) => log(&format!("settings window: {e:#}")),
+            self.draw_settings();
+            if let Some(s) = self.settings.as_mut() {
+                s.begin_opening();
+                s.window.focus_window();
+            }
         }
     }
 
@@ -307,7 +298,6 @@ impl App {
         let Err(e) = self.config.save() else {
             return true;
         };
-        log(&format!("config save: {e:#}"));
         if self.settings.is_some() {
             self.settings_message(&format!("Couldn't save settings: {e}"), true);
         } else {
@@ -617,14 +607,12 @@ impl App {
                         }
                         self.config.shell_menu = d.shell_menu;
                         if let Err(e) = crate::shell_menu::sync(self.config.shell_menu) {
-                            log(&format!("explorer menu: {e:#}"));
                             clash.push(format!("Couldn't change the Explorer menu: {e}"));
                         }
                         let stopped = config::set_autostart(false);
                         self.autostart = config::autostart_enabled();
                         match stopped {
                             Err(e) => {
-                                log(&format!("restore autostart: {e:#}"));
                                 clash.push(format!("Couldn't change startup: {e}"));
                             }
                             Ok(()) if self.autostart => clash.push("Couldn't remove the startup entry".to_string()),
@@ -638,7 +626,6 @@ impl App {
                                     }
                                 }
                                 Err(e) => {
-                                    log(&format!("restore settings folder: {e:#}"));
                                     clash.push(format!("Couldn't move the settings: {e}"));
                                 }
                             }
@@ -663,7 +650,6 @@ impl App {
                         }
                         for (a, old) in reset.iter().zip(&before) {
                             if let Err(e) = self.set_hotkey(*a, Some(&d.hotkeys[a.index()])) {
-                                log(&format!("restore hotkey: {e:#}"));
                                 clash.push(format!("{}: {e}", a.title()));
                                 let _ = self.set_hotkey(*a, Some(old));
                             }

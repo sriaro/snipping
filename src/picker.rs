@@ -31,7 +31,7 @@ const RECENT_Y: f32 = 262.0;
 const RECENT: usize = 8;
 
 type Rgb = [u8; 3];
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(PartialEq)]
 pub enum Pick {
     Live,
     Commit,
@@ -40,7 +40,6 @@ pub enum Pick {
 
 type Callback = Rc<dyn Fn(Rgb, Pick)>;
 
-#[derive(Clone, Copy, PartialEq)]
 enum Drag {
     None,
     Sv,

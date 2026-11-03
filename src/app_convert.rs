@@ -2,7 +2,7 @@ use crate::{
     App, MenuAction, UserEvent,
     convert::{self, Kind, Progress, ResizeFilter, Source},
     convert_ui::{ConvertWindow, Effect, Looked, MAX_FILES, Wd, filter_label, look_up},
-    dialogs, hwnd_of, log,
+    dialogs, hwnd_of,
     menu::{self, Entry},
     text::Text,
 };
@@ -126,6 +126,9 @@ fn read_request(path: &Path) -> Option<String> {
 
 fn take_requests(dir: &Path) -> Vec<String> {
     let mut lines = Vec::new();
+    let commands = ["--settings", "--record", "--capture"];
+    let mut asked = [false; 3];
+    let mut bytes = 0;
     if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
         return lines;
     }
@@ -134,12 +137,22 @@ fn take_requests(dir: &Path) -> Vec<String> {
         if !path.extension().is_some_and(|x| x == "txt") || !e.file_type().is_ok_and(|t| t.is_file()) {
             continue;
         }
-        let stale = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > std::time::Duration::from_secs(120)));
-        if !stale && let Some(text) = read_request(&path) {
-            lines.extend(text.lines().filter(|l| !l.trim().is_empty()).map(str::to_string));
+        let readable = e.metadata().is_ok_and(|m| {
+            m.len() <= MAX_REQUEST_BYTES && !m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|age| age > std::time::Duration::from_secs(120)))
+        });
+        if readable && let Some(text) = read_request(&path) {
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                if let Some(i) = commands.iter().position(|command| *command == line) {
+                    asked[i] = true;
+                } else if lines.len() < MAX_FILES && line.len() <= MAX_REQUEST_BYTES as usize - bytes {
+                    bytes += line.len();
+                    lines.push(line.to_string());
+                }
+            }
         }
         let _ = std::fs::remove_file(&path);
     }
+    lines.extend(commands.into_iter().zip(asked).filter(|(_, asked)| *asked).map(|(command, _)| command.to_string()));
     lines
 }
 
@@ -201,7 +214,7 @@ impl App {
                         w.begin_opening();
                     }
                 }
-                Err(e) => return log(&format!("convert window: {e:#}")),
+                Err(_) => return,
             }
         }
         if let Some(id) = self.convert.as_ref().map(|w| w.id()) {
@@ -239,7 +252,6 @@ impl App {
                 files.push(PathBuf::from(line));
             }
         }
-        files.truncate(MAX_FILES);
         if settings {
             self.open_settings(el);
         }
@@ -293,9 +305,7 @@ impl App {
         let prefs = w.prefs();
         if prefs != self.config.convert {
             self.config.convert = prefs;
-            if let Err(e) = self.config.save() {
-                log(&format!("config save: {e:#}"));
-            }
+            let _ = self.config.save();
         }
     }
 
@@ -560,10 +570,8 @@ impl App {
         if !self.convert.as_ref().is_some_and(|w| w.id() == window) {
             return;
         }
-        match res {
-            Ok(Some(files)) => self.look_up_files(window, files, false),
-            Ok(None) => {}
-            Err(e) => log(&format!("open images: {e}")),
+        if let Ok(Some(files)) = res {
+            self.look_up_files(window, files, false);
         }
     }
 
@@ -572,13 +580,10 @@ impl App {
             return;
         }
         let proxy = self.proxy.clone();
-        let spawned = std::thread::Builder::new().name("convert-look".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("convert-look".into()).spawn(move || {
             let paths = if folders { expand(paths, MAX_FILES) } else { paths };
             let _ = proxy.send_event(UserEvent::ConvertLooked(window, look_up(paths)));
         });
-        if let Err(e) = spawned {
-            log(&format!("convert look: {e}"));
-        }
     }
 
     pub(crate) fn convert_files_looked(&mut self, window: WindowId, looked: Looked) {
@@ -637,6 +642,9 @@ impl App {
     }
 
     pub(crate) fn pump_estimate(&mut self) {
+        if self.estimating {
+            return;
+        }
         let Some(w) = self.convert.as_mut() else {
             return;
         };
@@ -644,14 +652,20 @@ impl App {
             return;
         };
         let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
+        self.estimating = true;
+        let spawned = std::thread::Builder::new().name("convert-estimate".into()).spawn(move || {
             crate::par::lower_priority();
             let res = convert::estimate(&src, &params).map_err(|e| format!("{e:#}"));
             let _ = proxy.send_event(UserEvent::ConvertEstimate(round, res));
         });
+        if let Err(e) = spawned {
+            self.estimating = false;
+            w.set_estimate(round, Err(format!("Cannot start image estimation: {e}")));
+        }
     }
 
     pub(crate) fn convert_estimate_done(&mut self, round: u64, res: Result<convert::Estimate, String>) {
+        self.estimating = false;
         if let Some(w) = self.convert.as_mut() {
             w.set_estimate(round, res);
         }

@@ -269,7 +269,8 @@ imagepipe 0.5.1
     source:  https://github.com/pedrocr/imagepipe
     note:    built from a modified copy in vendor/imagepipe (changed 2026-10-28): the manifest
              no longer enables the image crate's default features, and source comments, the
-             tests, the converter binary and the README were removed
+             tests, the converter binary and the README were removed; an unused test-image
+             factory was removed on 2026-11-02
 imagesize 0.15.0
     licence: MIT
     source:  https://github.com/Roughsketch/imagesize

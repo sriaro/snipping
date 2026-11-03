@@ -88,6 +88,9 @@ fn paths_of(items: Option<&IShellItemArray>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     unsafe {
         for i in 0..items.GetCount().unwrap_or(0) {
+            if out.len() >= crate::convert_ui::MAX_FILES {
+                break;
+            }
             out.extend(items.GetItemAt(i).ok().and_then(|item| fs_path(&item)).filter(|p| is_text(p)));
         }
     }
@@ -835,39 +838,22 @@ static PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize:
 
 pub fn prepare_package(enabled: bool) {
     let Some(dir) = package_dir() else {
-        crate::log("windows 11 menu: no package directory");
         return;
     };
     let _guard = PKG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if enabled {
-        if let Err(error) = write_assets(&dir) {
-            crate::log(&format!("windows 11 menu assets: {error:#}"));
+        if write_assets(&dir).is_err() {
             return;
         }
-        let exe = match std::env::current_exe() {
-            Ok(exe) => exe,
-            Err(e) => {
-                crate::log(&format!("windows 11 menu: executable path: {e}"));
-                return;
-            }
+        let Ok(exe) = std::env::current_exe() else {
+            return;
         };
         if is_registered(&dir, &exe) || has_identity() || !is_windows_11() || !developer_mode() {
             return;
         }
-        if let Err(e) = register(&exe) {
-            crate::log(&format!("windows 11 menu: {e:#}"));
-        }
-    } else if !has_identity() && is_left(&dir) {
-        match with_runtime(|| remove_installed(exe_file_name().as_os_str())) {
-            Ok(()) => {
-                if let Err(e) = std::fs::remove_file(marker(&dir))
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    crate::log(&format!("windows 11 menu: removing package marker: {e}"));
-                }
-            }
-            Err(e) => crate::log(&format!("windows 11 menu: {e}")),
-        }
+        let _ = register(&exe);
+    } else if !has_identity() && is_left(&dir) && with_runtime(|| remove_installed(exe_file_name().as_os_str())).is_ok() {
+        let _ = std::fs::remove_file(marker(&dir));
     }
 }
 
@@ -881,7 +867,6 @@ pub fn sync(enabled: bool) {
             return;
         }
         if has_identity() {
-            crate::log("windows 11 menu: the package is registered with another manifest; it is updated the next time Snipping starts normally");
             return;
         }
         PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -889,9 +874,8 @@ pub fn sync(enabled: bool) {
             let guard = PKG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             if crate::shell_menu::wants_modern() {
                 let result = if is_registered(&dir, &exe) { Ok(()) } else { register(&exe) };
-                match result {
-                    Ok(()) => crate::shell_menu::package_took_over(),
-                    Err(e) => crate::log(&format!("windows 11 menu: {e:#}")),
+                if result.is_ok() {
+                    crate::shell_menu::package_took_over();
                 }
             }
             drop(guard);
@@ -899,7 +883,6 @@ pub fn sync(enabled: bool) {
         });
     } else if PENDING.load(std::sync::atomic::Ordering::SeqCst) > 0 || is_left(&dir) {
         if has_identity() {
-            crate::log("windows 11 menu: still registered; it is removed the next time Snipping starts normally");
             return;
         }
         PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
