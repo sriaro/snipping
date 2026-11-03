@@ -43,7 +43,7 @@ fn expand(paths: Vec<PathBuf>, limit: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let max_scan = limit.saturating_mul(4).max(1024);
     for p in paths {
-        if out.len() > limit {
+        if out.len() >= limit {
             break;
         }
         if p.is_dir() {
@@ -52,7 +52,7 @@ fn expand(paths: Vec<PathBuf>, limit: usize) -> Vec<PathBuf> {
             let mut scanned = 0;
             for e in std::fs::read_dir(&p).into_iter().flatten().flatten() {
                 scanned += 1;
-                if scanned > max_scan || out.len() + inner.len() > limit {
+                if scanned > max_scan || out.len() + inner.len() >= limit {
                     break;
                 }
                 let q = e.path();
@@ -70,7 +70,7 @@ fn expand(paths: Vec<PathBuf>, limit: usize) -> Vec<PathBuf> {
 }
 
 fn keep_dropped(dropped: &mut Vec<PathBuf>, path: PathBuf) {
-    if dropped.len() <= MAX_FILES {
+    if dropped.len() < MAX_FILES {
         dropped.push(path);
     }
 }

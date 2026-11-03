@@ -724,6 +724,17 @@ fn command_line(process: windows::Win32::Foundation::HANDLE) -> Option<String> {
     Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text as *const u16, bytes / 2) }))
 }
 
+fn process_image(process: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::{
+        Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW},
+        core::PWSTR,
+    };
+    let mut buf = vec![0u16; 32768];
+    let mut len = buf.len() as u32;
+    unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }.ok()?;
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
 fn end_servers(exe_name: &std::ffi::OsStr) -> usize {
     use windows::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},
@@ -735,6 +746,10 @@ fn end_servers(exe_name: &std::ffi::OsStr) -> usize {
     let Some(want) = exe_name.to_str() else {
         return 0;
     };
+    let Ok(exe) = std::env::current_exe() else {
+        return 0;
+    };
+    let current = exe.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
         return 0;
     };
@@ -748,10 +763,13 @@ fn end_servers(exe_name: &std::ffi::OsStr) -> usize {
         if entry.th32ProcessID != me && name.eq_ignore_ascii_case(want) {
             let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE;
             if let Ok(process) = unsafe { OpenProcess(access, false, entry.th32ProcessID) } {
-                let server = command_line(process).is_some_and(|c| is_server_command_line(&c));
-                if server && unsafe { TerminateProcess(process, 1) }.is_ok() {
-                    ended += 1;
-                    let _ = unsafe { WaitForSingleObject(process, 5000) } == WAIT_OBJECT_0;
+                let same = process_image(process).is_some_and(|image| image.trim_start_matches(r"\\?\").eq_ignore_ascii_case(&current));
+                if same {
+                    let server = command_line(process).is_some_and(|c| is_server_command_line(&c));
+                    if server && unsafe { TerminateProcess(process, 1) }.is_ok() {
+                        ended += 1;
+                        let _ = unsafe { WaitForSingleObject(process, 5000) } == WAIT_OBJECT_0;
+                    }
                 }
                 let _ = unsafe { CloseHandle(process) };
             }

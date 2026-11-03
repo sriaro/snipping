@@ -500,7 +500,7 @@ impl Config {
         let stranded = custom_dir().filter(|_| !config_dir_is_custom());
         let (mut cfg, first_run) = Self::read_from(config_path(), stranded, legacy_config_path());
         cfg.unreadable |= migrated.is_err();
-        if first_run && !cfg.unreadable {
+        if first_run && !cfg.unreadable && config_path().is_some_and(|path| !path.exists()) {
             let _ = cfg.save();
         }
         cfg
@@ -794,10 +794,14 @@ fn open_key(path: windows::core::PCWSTR, access: windows::Win32::System::Registr
 }
 
 pub(crate) fn reg_string(root: HKEY, key: &str, name: Option<&str>) -> Option<String> {
+    const MAX_VALUE_BYTES: u32 = 1 << 20;
     let (key, name) = (crate::wide(key), name.map(crate::wide));
     let (key, name) = (PCWSTR(key.as_ptr()), name.as_ref().map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr())));
     let mut size = 0u32;
     unsafe { RegGetValueW(root, key, name, RRF_RT_REG_SZ, None, None, Some(&mut size)) }.ok().ok()?;
+    if size == 0 || size > MAX_VALUE_BYTES {
+        return None;
+    }
     let mut buf = vec![0u16; size as usize / 2 + 1];
     size = (buf.len() * 2) as u32;
     unsafe { RegGetValueW(root, key, name, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut size)) }.ok().ok()?;

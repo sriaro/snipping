@@ -909,19 +909,29 @@ mod system {
     }
 }
 
+const MAX_FONT_BYTES: u64 = 128 << 20;
+
+fn read_font_file(path: &Path) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
 fn read_font(path: &Path) -> Option<(Font, bool)> {
-    let mut bytes = std::fs::read(path).ok()?;
+    let mut bytes = read_font_file(path)?;
     if keep_english(&mut bytes) {
         if let Ok(font) = Font::from_bytes(&bytes[..], ui_font_settings()) {
             return Some((font, true));
         }
-        bytes = std::fs::read(path).ok()?;
+        bytes = read_font_file(path)?;
     }
     Some((Font::from_bytes(bytes, ui_font_settings()).ok()?, false))
 }
 
 fn read_whole_font(path: &Path) -> Option<Font> {
-    Font::from_bytes(std::fs::read(path).ok()?, ui_font_settings()).ok()
+    Font::from_bytes(read_font_file(path)?, ui_font_settings()).ok()
 }
 
 fn ui_font_settings() -> FontSettings {
