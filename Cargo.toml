@@ -1,6 +1,6 @@
 [package]
 name = "snipping"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Screenshot, annotation, recording and conversion tool for Windows"
@@ -25,6 +25,7 @@ heic = "0.1.6"
 hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["simd"] }
 resvg = "0.48.1"
 imagepipe = "0.5.1"
+rawloader = "0.37.2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif", "tiff", "ico"] }
 png = "0.18.1"
 rgb = "0.8"
@@ -38,7 +39,7 @@ tray-icon = "0.26.1"
 unicode-segmentation = "1.13.3"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 windows-core = "0.62.2"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Registry", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Power", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_Media_MediaFoundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Globalization", "Win32_System_Shutdown", "Win32_System_Diagnostics_ToolHelp", "Foundation", "Management_Deployment", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Storage_Packaging_Appx"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Registry", "Win32_Security", "Win32_Security_Isolation", "Win32_System_Pipes", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Power", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_Media_MediaFoundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Globalization", "Win32_System_Shutdown", "Win32_System_Diagnostics_ToolHelp", "Foundation", "Management_Deployment", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Storage_Packaging_Appx"] }
 winit = "0.30.13"
 zenwebp = "0.4.4"
 zenavif = { version = "0.1.6", default-features = false }

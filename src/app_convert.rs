@@ -124,6 +124,13 @@ fn read_request(path: &Path) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
+fn request_file(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else { return false };
+    let Some(stem) = name.strip_suffix(".txt") else { return false };
+    let Some((pid, nanos)) = stem.split_once('-') else { return false };
+    !pid.is_empty() && !nanos.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && nanos.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn take_requests(dir: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     let commands = ["--settings", "--record", "--capture"];
@@ -134,7 +141,7 @@ fn take_requests(dir: &Path) -> Vec<String> {
     }
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = e.path();
-        if !path.extension().is_some_and(|x| x == "txt") || !e.file_type().is_ok_and(|t| t.is_file()) {
+        if !request_file(&e.file_name()) || !e.file_type().is_ok_and(|t| t.is_file()) {
             continue;
         }
         let readable = e.metadata().is_ok_and(|m| {

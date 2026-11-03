@@ -1,4 +1,4 @@
-use crate::convert::{MAX_DECODE_PIXELS, MAX_DECODE_SIDE, check_size};
+use crate::convert::{MAX_DECODE_PIXELS, MAX_DECODE_SIDE, check_size, pixel_buffer};
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 
@@ -34,7 +34,7 @@ pub fn heic(bytes: &[u8]) -> Result<Rgba> {
     let request = || config.decode_request(bytes).with_output_layout(PixelLayout::Rgba8).with_limits(&limits);
     if let Some((w, h)) = plain_grid(bytes) {
         check_size(w, h)?;
-        let mut px = vec![0; w as usize * h as usize * 4];
+        let mut px = pixel_buffer(w as usize * h as usize * 4, 0u8)?;
         match request().decode_into(&mut px) {
             Ok((w, h)) => {
                 check_size(w, h)?;
@@ -391,9 +391,19 @@ pub fn svg(bytes: &[u8]) -> Result<Rgba> {
     Ok((data, w, h))
 }
 
-pub fn raw(path: &Path) -> Result<Rgba> {
-    let mut pipeline = imagepipe::Pipeline::new_from_file(path).map_err(|e| anyhow!("RAW: {e}"))?;
+pub fn raw(path: &Path, bytes: &[u8]) -> Result<Rgba> {
+    let source = match rawloader::decode(&mut std::io::Cursor::new(bytes)) {
+        Ok(img) => imagepipe::ImageSource::Raw(img),
+        Err(_) => match image::ImageFormat::from_path(path).and_then(|f| image::load_from_memory_with_format(bytes, f)) {
+            Ok(img) => imagepipe::ImageSource::Other(img),
+            Err(_) => bail!("RAW: imagepipe: Don't know how to decode image"),
+        },
+    };
+    let mut pipeline = imagepipe::Pipeline::new_from_source(source).map_err(|e| anyhow!("RAW: {e}"))?;
     if let imagepipe::ImageSource::Raw(img) = &pipeline.globals.image {
+        let w = u32::try_from(img.width).map_err(|_| anyhow!("RAW: the picture is too large"))?;
+        let h = u32::try_from(img.height).map_err(|_| anyhow!("RAW: the picture is too large"))?;
+        check_size(w, h)?;
         if img.orientation.to_u16() == 7 {
             (pipeline.ops.transform.fliph, pipeline.ops.transform.flipv) = (false, true);
         }

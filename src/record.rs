@@ -75,6 +75,15 @@ pub fn check_area(area: [i32; 4]) -> Result<()> {
     Ok(())
 }
 
+fn create_recording_file(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+}
+
 pub fn start(area: [i32; 4], settings: Settings, done: impl FnOnce(Result<PathBuf, String>) + Send + 'static) -> Result<Recorder> {
     check_area(area)?;
     let [_, _, w, h] = area;
@@ -82,9 +91,15 @@ pub fn start(area: [i32; 4], settings: Settings, done: impl FnOnce(Result<PathBu
     sweep(&work, std::process::id(), process_alive);
     let path = work.join(format!("snipping-rec-{}-{}.{}.part", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()), settings.ext()));
     let pipeline = if settings.mp4 {
-        crate::recfmt::Pipeline::new_mp4(settings, (w as u32, h as u32), path.clone())?
+        match crate::recfmt::Pipeline::new_mp4(settings, (w as u32, h as u32), path.clone()) {
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(e);
+            }
+        }
     } else {
-        let file = File::create(&path).map_err(|e| anyhow!("can't create the recording file: {e}"))?;
+        let file = create_recording_file(&path).map_err(|e| anyhow!("can't create the recording file: {e}"))?;
         crate::recfmt::Pipeline::new(settings, (w as u32, h as u32), file).inspect_err(|_| {
             let _ = std::fs::remove_file(&path);
         })?

@@ -2408,10 +2408,11 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         self.request_redraw();
                     }
-                    Err(_) => {
+                    Err(e) => {
                         self.take_foreground();
                         self.request_redraw();
                         beep();
+                        std::thread::spawn(move || convert::message_box(&format!("Snipping couldn't open the Save dialog.\n\n{e}\n\nThe screenshot is still open.")));
                     }
                 }
             }
@@ -2731,7 +2732,11 @@ fn write_in_background(mut target: SaveTarget, params: convert::Params, w: u32, 
                         ext = "png";
                         b
                     }
-                    Err(_) => return,
+                    Err(e) => {
+                        drop(done);
+                        convert::message_box(&format!("Snipping couldn't encode the screenshot.\n\n{e:#}\n\nThe screenshot was not saved."));
+                        return;
+                    }
                 }
             }
         };

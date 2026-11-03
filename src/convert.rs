@@ -375,12 +375,6 @@ enum Reader {
     Image,
 }
 
-impl Reader {
-    fn isolated(self) -> bool {
-        matches!(self, Reader::Raw | Reader::Heic | Reader::Jpeg2000 | Reader::Psd | Reader::Svg | Reader::Avif | Reader::Jxl | Reader::Ico | Reader::Tiff)
-    }
-}
-
 fn pick_reader(path: &Path) -> Result<Reader> {
     use std::io::Read;
     let len = std::fs::metadata(path).with_context(|| format!("can't open {}", path.display()))?.len();
@@ -389,73 +383,63 @@ fn pick_reader(path: &Path) -> Result<Reader> {
     }
     let mut head = [0u8; 16];
     let n = std::fs::File::open(path).with_context(|| format!("can't open {}", path.display()))?.read(&mut head)?;
-    let head = &head[..n];
+    Ok(reader_for(path, &head[..n]))
+}
+
+fn reader_for(path: &Path, head: &[u8]) -> Reader {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let is_riff_webp = head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP";
     let is_avif = head.len() >= 12 && &head[4..8] == b"ftyp" && matches!(&head[8..12], b"avif" | b"avis");
     let is_jxl = head.starts_with(&[0xFF, 0x0A]) || head.get(4..8) == Some(b"JXL ");
     if is_riff_webp {
-        return Ok(Reader::Webp);
+        return Reader::Webp;
     }
     if crate::readers::is_raw(&ext) {
-        return Ok(Reader::Raw);
+        return Reader::Raw;
     }
     let brand = if head.len() >= 12 && &head[4..8] == b"ftyp" { &head[8..12] } else { &[][..] };
     let is_heic = matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"hevm" | b"hevs" | b"mif1" | b"msf1") || matches!(ext.as_str(), "heic" | "heif" | "hif");
     if is_heic && !is_avif && ext != "avif" {
-        return Ok(Reader::Heic);
+        return Reader::Heic;
     }
     if head.starts_with(&[0, 0, 0, 12, b'j', b'P', b' ', b' ']) || head.starts_with(&[0xFF, 0x4F, 0xFF, 0x51]) || matches!(ext.as_str(), "jp2" | "j2k" | "j2c" | "jpc") {
-        return Ok(Reader::Jpeg2000);
+        return Reader::Jpeg2000;
     }
     if head.starts_with(b"8BPS") {
-        return Ok(Reader::Psd);
+        return Reader::Psd;
     }
     if matches!(ext.as_str(), "svg" | "svgz") {
-        return Ok(Reader::Svg);
+        return Reader::Svg;
     }
     if is_avif || ext == "avif" {
-        return Ok(Reader::Avif);
+        return Reader::Avif;
     }
     if is_jxl || ext == "jxl" {
-        return Ok(Reader::Jxl);
+        return Reader::Jxl;
     }
     if head.starts_with(&[0, 0, 1, 0]) || ext == "ico" {
-        return Ok(Reader::Ico);
+        return Reader::Ico;
     }
     if [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"].iter().any(|magic| head.starts_with(*magic)) {
-        return Ok(Reader::Tiff);
+        return Reader::Tiff;
     }
-    Ok(Reader::Image)
+    Reader::Image
 }
 
-pub(crate) fn read_image_bytes(path: &Path) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).with_context(|| format!("can't read {}", path.display()))?;
-    if file.metadata()?.len() > MAX_FILE_BYTES {
-        bail!("the file is too large to open");
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).with_context(|| format!("can't read {}", path.display()))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        bail!("the file is too large to open");
-    }
-    Ok(bytes)
-}
-
-fn run_reader(reader: Reader, path: &Path) -> Result<Picture> {
-    let bytes = || read_image_bytes(path);
-    match reader {
-        Reader::Webp => decode_webp(&bytes()?),
-        Reader::Raw => Ok(plain(eight(crate::readers::raw(path))?)),
-        Reader::Heic => crate::readers::heic_any(&bytes()?),
-        Reader::Jpeg2000 => Ok(plain(eight(crate::readers::jpeg2000(&bytes()?))?)),
-        Reader::Psd => Ok(plain(eight(crate::readers::psd(&bytes()?))?)),
-        Reader::Svg => Ok(plain(eight(crate::readers::svg(&bytes()?))?)),
-        Reader::Avif => decode_avif_any(&bytes()?),
-        Reader::Jxl => decode_jxl(path),
-        Reader::Ico | Reader::Tiff | Reader::Image => decode_with_image(path),
-    }
+fn decode_bytes(path: &Path, bytes: Vec<u8>) -> Result<Picture> {
+    let mut pic = match reader_for(path, &bytes) {
+        Reader::Webp => decode_webp(&bytes)?,
+        Reader::Raw => plain(eight(crate::readers::raw(path, &bytes))?),
+        Reader::Heic => crate::readers::heic_any(&bytes)?,
+        Reader::Jpeg2000 => plain(eight(crate::readers::jpeg2000(&bytes))?),
+        Reader::Psd => plain(eight(crate::readers::psd(&bytes))?),
+        Reader::Svg => plain(eight(crate::readers::svg(&bytes))?),
+        Reader::Avif => decode_avif_any(&bytes)?,
+        Reader::Jxl => decode_jxl(&bytes)?,
+        Reader::Ico | Reader::Tiff | Reader::Image => decode_with_image(path, std::io::Cursor::new(bytes))?,
+    };
+    pic.icc = crate::color::usable(pic.icc.take());
+    Ok(pic)
 }
 
 fn check_cancelled(stop: &Stop) -> Result<()> {
@@ -464,29 +448,62 @@ fn check_cancelled(stop: &Stop) -> Result<()> {
 
 fn decode_unguarded(path: &Path, stop: &Stop) -> Result<Picture> {
     check_cancelled(stop)?;
-    let reader = pick_reader(path)?;
-    if reader.isolated() && !IN_HELPER.load(Ordering::Relaxed) {
-        return decode_in_helper(path, stop);
-    }
-    let mut pic = run_reader(reader, path)?;
+    let picture = decode_in_helper(path, stop)?;
     check_cancelled(stop)?;
-    pic.icc = crate::color::usable(pic.icc.take());
-    Ok(pic)
+    Ok(picture)
 }
 
 const HELPER_ARG: &str = "--decode-helper";
 const HELPER_MEMORY: usize = 4 << 30;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(120);
+const HELPER_PIPE: u32 = 1 << 20;
+const HELPER_CONTAINER: windows::core::PCWSTR = windows::core::w!("Snipping.Decoder");
+const MAX_NAME_BYTES: usize = 4096;
 
 static IN_HELPER: AtomicBool = AtomicBool::new(false);
+static CONTAINER_USERS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static SPAWNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct Container(windows::Win32::Security::PSID);
+
+impl Container {
+    fn enter() -> Option<Self> {
+        use windows::Win32::{
+            Foundation::ERROR_ALREADY_EXISTS,
+            Security::Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName},
+        };
+        let mut users = CONTAINER_USERS.lock().unwrap_or_else(|e| e.into_inner());
+        let sid = unsafe {
+            match CreateAppContainerProfile(HELPER_CONTAINER, HELPER_CONTAINER, HELPER_CONTAINER, None) {
+                Err(e) if e.code() == ERROR_ALREADY_EXISTS.to_hresult() => DeriveAppContainerSidFromAppContainerName(HELPER_CONTAINER),
+                sid => sid,
+            }
+        }
+        .ok()?;
+        *users += 1;
+        Some(Container(sid))
+    }
+}
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        use windows::Win32::Security::{FreeSid, Isolation::DeleteAppContainerProfile};
+        let mut users = CONTAINER_USERS.lock().unwrap_or_else(|e| e.into_inner());
+        *users -= 1;
+        unsafe {
+            FreeSid(self.0);
+            if *users == 0 {
+                let _ = DeleteAppContainerProfile(HELPER_CONTAINER);
+            }
+        }
+    }
+}
 
 struct HelperJob(windows::Win32::Foundation::HANDLE);
 
 impl HelperJob {
-    fn contain(child: &std::process::Child) -> Option<Self> {
-        use std::os::windows::io::AsRawHandle;
+    fn contain(process: windows::Win32::Foundation::HANDLE) -> Option<Self> {
         use windows::Win32::{
-            Foundation::HANDLE,
             System::JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS,
@@ -513,7 +530,7 @@ impl HelperJob {
                     | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
             };
             SetInformationJobObject(job.0, JobObjectBasicUIRestrictions, &ui as *const _ as *const std::ffi::c_void, size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32).ok()?;
-            AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())).ok()?;
+            AssignProcessToJobObject(job.0, process).ok()?;
             Some(job)
         }
     }
@@ -532,50 +549,200 @@ enum Helped {
     Anim(bool),
 }
 
-fn run_helper(path: &Path, anim: Option<&mut dyn crate::anim::Sink>, stop: &Stop) -> Result<Helped> {
-    use std::{
-        os::windows::io::AsRawHandle,
-        process::{Command, Stdio},
-        sync::mpsc,
+struct Spawned {
+    process: std::os::windows::io::OwnedHandle,
+    input: std::fs::File,
+    output: std::fs::File,
+    job: HelperJob,
+}
+
+fn end_process(process: &std::os::windows::io::OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        System::Threading::{INFINITE, TerminateProcess, WaitForSingleObject},
+    };
+    unsafe {
+        let _ = TerminateProcess(HANDLE(process.as_raw_handle()), 1);
+        WaitForSingleObject(HANDLE(process.as_raw_handle()), INFINITE);
+    }
+}
+
+fn spawn_helper(animation: bool, container: Option<&Container>) -> Result<Spawned> {
+    use std::os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+    use windows::{
+        Win32::{
+            Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
+            Security::SECURITY_CAPABILITIES,
+            System::{
+                Pipes::CreatePipe,
+                Threading::{
+                    CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+                },
+            },
+        },
+        core::{PCWSTR, PWSTR},
     };
     let exe = std::env::current_exe().context("can't find Snipping.exe")?;
-    let mut cmd = Command::new(exe);
-    cmd.arg(HELPER_ARG).arg(path);
-    if anim.is_some() {
-        cmd.arg("--anim");
-    }
-    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("can't start the decoder")?;
-    let Some(job) = HelperJob::contain(&child) else {
-        let _ = child.kill();
-        let _ = child.wait();
+    let app: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+    let mut line: Vec<u16> = std::iter::once(u16::from(b'"'))
+        .chain(exe.as_os_str().encode_wide())
+        .chain(format!("\" {HELPER_ARG}{}", if animation { " --anim" } else { "" }).encode_utf16())
+        .chain([0])
+        .collect();
+    let pipe = || -> Result<(OwnedHandle, OwnedHandle)> {
+        let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+        unsafe {
+            CreatePipe(&mut read, &mut write, None, HELPER_PIPE).context("can't start the decoder")?;
+            Ok((OwnedHandle::from_raw_handle(read.0), OwnedHandle::from_raw_handle(write.0)))
+        }
+    };
+    let (child_in, input) = pipe()?;
+    let (output, child_out) = pipe()?;
+    let spawning = SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+    let inheritable = |h: &OwnedHandle| -> Result<OwnedHandle> {
+        let mut copy = HANDLE::default();
+        unsafe {
+            DuplicateHandle(GetCurrentProcess(), HANDLE(h.as_raw_handle()), GetCurrentProcess(), &mut copy, 0, true, DUPLICATE_SAME_ACCESS).context("can't start the decoder")?;
+            Ok(OwnedHandle::from_raw_handle(copy.0))
+        }
+    };
+    let handles = [inheritable(&child_in)?, inheritable(&child_out)?];
+    let raw = handles.each_ref().map(|h| HANDLE(h.as_raw_handle()));
+    let count = if container.is_some() { 2 } else { 1 };
+    let mut size = 0usize;
+    let _ = unsafe { InitializeProcThreadAttributeList(None, count, None, &mut size) };
+    let mut storage = vec![0u64; size.div_ceil(8).max(1)];
+    let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
+    unsafe { InitializeProcThreadAttributeList(Some(list), count, None, &mut size) }.context("can't start the decoder")?;
+    let capabilities = SECURITY_CAPABILITIES { AppContainerSid: container.map(|c| c.0).unwrap_or_default(), ..Default::default() };
+    let created = (|| unsafe {
+        UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, Some(raw.as_ptr().cast()), size_of_val(&raw), None, None)?;
+        if container.is_some() {
+            UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize, Some((&capabilities as *const SECURITY_CAPABILITIES).cast()), size_of::<SECURITY_CAPABILITIES>(), None, None)?;
+        }
+        let info = STARTUPINFOEXW {
+            StartupInfo: STARTUPINFOW { cb: size_of::<STARTUPINFOEXW>() as u32, dwFlags: STARTF_USESTDHANDLES, hStdInput: raw[0], hStdOutput: raw[1], ..Default::default() },
+            lpAttributeList: list,
+        };
+        let mut process = PROCESS_INFORMATION::default();
+        CreateProcessW(
+            PCWSTR(app.as_ptr()),
+            Some(PWSTR(line.as_mut_ptr())),
+            None,
+            None,
+            true,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &info.StartupInfo,
+            &mut process,
+        )?;
+        windows::core::Result::Ok(process)
+    })();
+    unsafe { DeleteProcThreadAttributeList(list) };
+    drop(handles);
+    drop(spawning);
+    drop((child_in, child_out));
+    let created = created.context("can't start the decoder")?;
+    let (process, thread) = unsafe { (OwnedHandle::from_raw_handle(created.hProcess.0), OwnedHandle::from_raw_handle(created.hThread.0)) };
+    let Some(job) = HelperJob::contain(HANDLE(process.as_raw_handle())) else {
+        end_process(&process);
         bail!("can't start the decoder safely");
     };
-    if let Some(mut go) = child.stdin.take() {
-        use std::io::Write;
-        let _ = go.write_all(b"G");
+    if unsafe { ResumeThread(HANDLE(thread.as_raw_handle())) } == u32::MAX {
+        end_process(&process);
+        bail!("can't start the decoder");
     }
-    let mut out = child.stdout.take().context("no decoder output")?;
+    Ok(Spawned { process, input: input.into(), output: output.into(), job })
+}
+
+fn send_input(input: &mut std::fs::File, name: &str, file: std::fs::File, len: u64) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let name = &name.as_bytes()[..name.len().min(MAX_NAME_BYTES)];
+    input.write_all(&(name.len() as u32).to_le_bytes())?;
+    input.write_all(name)?;
+    input.write_all(&len.to_le_bytes())?;
+    if std::io::copy(&mut std::io::BufReader::with_capacity(HELPER_PIPE as usize, file.take(len)), input)? != len {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(())
+}
+
+fn read_input(input: &mut impl std::io::Read) -> Result<(PathBuf, Vec<u8>)> {
+    let unexpected = |_| anyhow!("the decoder didn't get the whole file");
+    let mut n = [0u8; 4];
+    input.read_exact(&mut n).map_err(unexpected)?;
+    let n = u32::from_le_bytes(n) as usize;
+    if n > MAX_NAME_BYTES {
+        bail!("unexpected decoder input");
+    }
+    let mut name = vec![0u8; n];
+    input.read_exact(&mut name).map_err(unexpected)?;
+    let mut len = [0u8; 8];
+    input.read_exact(&mut len).map_err(unexpected)?;
+    let len = u64::from_le_bytes(len);
+    if len > MAX_FILE_BYTES {
+        bail!("the file is too large to open ({} MB)", len >> 20);
+    }
+    let mut bytes = pixel_buffer(len as usize, 0u8)?;
+    input.read_exact(&mut bytes).map_err(unexpected)?;
+    Ok((PathBuf::from(String::from_utf8_lossy(&name).into_owned()), bytes))
+}
+
+fn run_helper(path: &Path, anim: Option<&mut dyn crate::anim::Sink>, stop: &Stop) -> Result<Helped> {
+    use std::{os::windows::io::AsRawHandle, sync::mpsc};
+    let file = std::fs::File::open(path).with_context(|| format!("can't read {}", path.display()))?;
+    let len = file.metadata().with_context(|| format!("can't read {}", path.display()))?.len();
+    if len > MAX_FILE_BYTES {
+        bail!("the file is too large to open ({} MB)", len >> 20);
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut container = Container::enter();
+    let spawned = match spawn_helper(anim.is_some(), container.as_ref()) {
+        Err(_) if container.is_some() => {
+            container = None;
+            spawn_helper(anim.is_some(), None)
+        }
+        spawned => spawned,
+    };
+    let Spawned { process, mut input, mut output, job } = spawned?;
     let (clock, ticks) = mpsc::channel::<bool>();
-    let handle = child.as_raw_handle() as isize;
+    let handle = process.as_raw_handle() as isize;
+    let kill = move || unsafe {
+        let _ = windows::Win32::System::Threading::TerminateProcess(windows::Win32::Foundation::HANDLE(handle as *mut _), 1);
+    };
     let result = std::thread::scope(|s| {
-        let watchdog = s.spawn(move || {
-            watch(&ticks, HELPER_TIMEOUT, stop, || unsafe {
-                let _ = windows::Win32::System::Threading::TerminateProcess(windows::Win32::Foundation::HANDLE(handle as *mut _), 1);
-            })
-        });
-        let result = read_answer(&mut out, anim, &|waiting| {
+        let watchdog = s.spawn(move || watch(&ticks, HELPER_TIMEOUT, stop, kill));
+        let sent = send_input(&mut input, &name, file, len);
+        drop(input);
+        let answer = read_answer(&mut output, anim, &|waiting| {
             let _ = clock.send(waiting);
         });
+        let result = match sent {
+            Err(e) if answer.is_err() && e.kind() != std::io::ErrorKind::BrokenPipe => Err(anyhow::Error::new(e).context(format!("can't read {}", path.display()))),
+            _ => answer,
+        };
+        drop(output);
         if result.is_err() {
-            let _ = child.kill();
+            end_process(&process);
+        } else {
+            unsafe {
+                use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+                WaitForSingleObject(windows::Win32::Foundation::HANDLE(handle as *mut _), INFINITE);
+            }
         }
-        drop(out);
-        let _ = child.wait();
         drop(clock);
         let _ = watchdog.join();
         result
     });
+    drop(process);
     drop(job);
+    drop(container);
     match result {
         Err(_) if stop() => Err(crate::anim::Stopped.into()),
         result => result,
@@ -694,13 +861,6 @@ fn decode_in_helper(path: &Path, stop: &Stop) -> Result<Picture> {
 }
 
 pub(crate) fn decode_animation(path: &Path, sink: &mut dyn crate::anim::Sink, stop: &Stop) -> Result<bool> {
-    if IN_HELPER.load(Ordering::Relaxed) {
-        let len = std::fs::metadata(path)?.len();
-        if len > MAX_FILE_BYTES {
-            bail!("the file is too large to open ({} MB)", len >> 20);
-        }
-        return crate::anim::decode_here(path, sink);
-    }
     match run_helper(path, Some(sink), stop)? {
         Helped::Anim(a) => Ok(a),
         Helped::Still(_) => bail!("unexpected decoder answer"),
@@ -757,15 +917,29 @@ fn drop_to_low_integrity() -> windows::core::Result<()> {
     }
 }
 
+fn in_app_container() -> bool {
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    let (mut token, mut is, mut size) = (HANDLE::default(), 0u32, 0u32);
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let read = GetTokenInformation(token, TokenIsAppContainer, Some((&mut is as *mut u32).cast()), size_of::<u32>() as u32, &mut size);
+        let _ = CloseHandle(token);
+        read.is_ok() && is != 0
+    }
+}
+
 pub fn run_decode_helper(args: &[std::ffi::OsString]) -> Option<i32> {
     use std::io::Write;
     if args.get(1).and_then(|a| a.to_str()) != Some(HELPER_ARG) {
         return None;
     }
-    let Some(path) = args.get(2) else {
-        return Some(2);
-    };
-    let animation = args.get(3).and_then(|a| a.to_str()) == Some("--anim");
+    let animation = args.get(2).and_then(|a| a.to_str()) == Some("--anim");
     IN_HELPER.store(true, Ordering::Relaxed);
     crate::par::lower_priority();
     let main = std::thread::current().id();
@@ -779,51 +953,48 @@ pub fn run_decode_helper(args: &[std::ffi::OsString]) -> Option<i32> {
             }
         }
     }));
-    {
-        use std::io::Read;
-        let mut go = [0u8; 1];
-        if !matches!(std::io::stdin().lock().read(&mut go), Ok(1)) {
-            return Some(3);
-        }
-    }
     let mut out = std::io::BufWriter::with_capacity(1 << 20, std::io::stdout().lock());
-    if let Err(e) = drop_to_low_integrity() {
+    if !in_app_container()
+        && let Err(e) = drop_to_low_integrity()
+    {
         let _ = out.write_all(b"ER").and_then(|()| out.write_all(format!("can't start the decoder safely: {e}").as_bytes())).and_then(|()| out.flush());
         return Some(4);
     }
-    let written = if animation {
-        match decode_animation(Path::new(path), &mut FrameSender { out: &mut out, size: 0 }, &|| false) {
+    let written = match read_input(&mut std::io::stdin().lock()) {
+        Err(e) => out.write_all(b"ER").and_then(|()| out.write_all(format!("{e:#}").as_bytes())),
+        Ok((_, bytes)) if animation => match crate::anim::decode_bytes(&bytes, &mut FrameSender { out: &mut out, size: 0 }) {
             Ok(false) => out.write_all(b"NA"),
             Ok(true) => out.write_all(b"EN"),
             Err(e) => out.write_all(b"ER").and_then(|()| out.write_all(format!("{e:#}").as_bytes())),
-        }
-    } else {
-        let decoded = decode_picture(Path::new(path)).and_then(|pic| match pic.px {
-            Decoded::Deep(deep) if deep.w as u64 * deep.h as u64 * 8 > MAX_DECODE_BYTES => eight_for_app(deep, pic.icc),
-            _ => Ok(pic),
-        });
-        let write_icc = |out: &mut std::io::BufWriter<std::io::StdoutLock>, icc: &Option<Vec<u8>>| -> std::io::Result<()> {
-            match icc {
-                Some(b) => out.write_all(&(b.len() as u32).to_le_bytes()).and_then(|()| out.write_all(b)),
-                None => out.write_all(&0u32.to_le_bytes()),
+        },
+        Ok((name, bytes)) => {
+            let decoded = guarded("decoding", || decode_bytes(&name, bytes)).and_then(|pic| match pic.px {
+                Decoded::Deep(deep) if deep.w as u64 * deep.h as u64 * 8 > MAX_DECODE_BYTES => eight_for_app(deep, pic.icc),
+                _ => Ok(pic),
+            });
+            let write_icc = |out: &mut std::io::BufWriter<std::io::StdoutLock>, icc: &Option<Vec<u8>>| -> std::io::Result<()> {
+                match icc {
+                    Some(b) => out.write_all(&(b.len() as u32).to_le_bytes()).and_then(|()| out.write_all(b)),
+                    None => out.write_all(&0u32.to_le_bytes()),
+                }
+            };
+            match decoded {
+                Ok(Picture { px: Decoded::Eight(px, w, h), icc }) => out
+                    .write_all(b"OK")
+                    .and_then(|()| out.write_all(&w.to_le_bytes()))
+                    .and_then(|()| out.write_all(&h.to_le_bytes()))
+                    .and_then(|()| out.write_all(&px))
+                    .and_then(|()| write_icc(&mut out, &icc)),
+                Ok(Picture { px: Decoded::Deep(d), icc }) => (|| {
+                    out.write_all(b"D6")?;
+                    out.write_all(&d.w.to_le_bytes())?;
+                    out.write_all(&d.h.to_le_bytes())?;
+                    out.write_all(&[d.cp, d.tc])?;
+                    out.write_all(bytemuck::cast_slice(&d.px))?;
+                    write_icc(&mut out, &icc)
+                })(),
+                Err(e) => out.write_all(b"ER").and_then(|()| out.write_all(format!("{e:#}").as_bytes())),
             }
-        };
-        match decoded {
-            Ok(Picture { px: Decoded::Eight(px, w, h), icc }) => out
-                .write_all(b"OK")
-                .and_then(|()| out.write_all(&w.to_le_bytes()))
-                .and_then(|()| out.write_all(&h.to_le_bytes()))
-                .and_then(|()| out.write_all(&px))
-                .and_then(|()| write_icc(&mut out, &icc)),
-            Ok(Picture { px: Decoded::Deep(d), icc }) => (|| {
-                out.write_all(b"D6")?;
-                out.write_all(&d.w.to_le_bytes())?;
-                out.write_all(&d.h.to_le_bytes())?;
-                out.write_all(&[d.cp, d.tc])?;
-                out.write_all(bytemuck::cast_slice(&d.px))?;
-                write_icc(&mut out, &icc)
-            })(),
-            Err(e) => out.write_all(b"ER").and_then(|()| out.write_all(format!("{e:#}").as_bytes())),
         }
     };
     Some(if written.and_then(|()| out.flush()).is_ok() { 0 } else { 1 })
@@ -963,7 +1134,9 @@ impl<R: std::io::BufRead + std::io::Seek> image::ImageDecoder for PngImage<R> {
     }
 
     fn read_image(mut self, buf: &mut [u8]) -> image::ImageResult<()> {
-        assert_eq!(buf.len() as u64, self.total_bytes());
+        if buf.len() as u64 != self.total_bytes() {
+            return Err(image::ImageError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, "PNG buffer size mismatch")));
+        }
         self.reader.next_frame(buf).map_err(|e| image::ImageError::Decoding(image::error::DecodingError::new(image::ImageFormat::Png.into(), e)))?;
         if self.color.bytes_per_pixel() / self.color.channel_count() == 2 {
             for sample in buf.as_chunks_mut::<2>().0 {
@@ -1003,9 +1176,13 @@ fn ico_decoder<R: std::io::BufRead + std::io::Seek + 'static>(mut r: R) -> Resul
     }
 }
 
-fn decode_with_image(path: &Path) -> Result<Picture> {
-    use image::{ColorType, ImageDecoder, ImageReader, Limits};
-    let mut reader = ImageReader::open(path).and_then(|r| r.with_guessed_format()).with_context(|| format!("can't read {}", path.display()))?;
+fn decode_with_image<R: std::io::BufRead + std::io::Seek + 'static>(path: &Path, r: R) -> Result<Picture> {
+    use image::{ColorType, ImageDecoder, ImageFormat, ImageReader, Limits};
+    let mut reader = ImageReader::new(r);
+    if let Ok(format) = ImageFormat::from_path(path) {
+        reader.set_format(format);
+    }
+    let mut reader = reader.with_guessed_format().with_context(|| format!("can't read {}", path.display()))?;
     if !image_format_allowed(reader.format()) {
         bail!("{} is not a picture format Snipping reads", path.display());
     }
@@ -1193,9 +1370,9 @@ pub(crate) fn pixels_to_rgba8(img: &zenavif::PixelBuffer) -> Result<(Vec<u8>, u3
     Ok((out, w, h))
 }
 
-fn decode_jxl(path: &Path) -> Result<Picture> {
+fn decode_jxl(bytes: &[u8]) -> Result<Picture> {
     use jxl_oxide::{AllocTracker, JxlImage};
-    let image = JxlImage::builder().alloc_tracker(AllocTracker::with_limit(JXL_ALLOC_LIMIT)).open(path).map_err(|e| anyhow!("JPEG XL: {e}"))?;
+    let image = JxlImage::builder().alloc_tracker(AllocTracker::with_limit(JXL_ALLOC_LIMIT)).read(bytes).map_err(|e| anyhow!("JPEG XL: {e}"))?;
     jxl_picture(image)
 }
 
@@ -2021,7 +2198,11 @@ fn memory_weight(src: &Source, p: &Params) -> usize {
     }
     let metadata = if matches!(reader, Some(Reader::Image | Reader::Tiff | Reader::Ico)) { PNG_WORKING_BYTES } else { 0 };
     let weight = if known { pixels.min(MAX_DECODE_PIXELS) as usize * STILL_BYTES_PER_PIXEL + metadata } else { 0 };
-    let helper = if reader.is_some_and(Reader::isolated) { helper_weight(known.then_some(w as u64 * h as u64)) } else { 0 };
+    let held = match src {
+        Source::File(path) => std::fs::metadata(path).map_or(0, |m| m.len().min(MAX_FILE_BYTES) as usize),
+        Source::Pixels { .. } => 0,
+    };
+    let helper = if reader.is_some() { helper_weight(known.then_some(w as u64 * h as u64)).saturating_add(held) } else { 0 };
     if !p.animation {
         return (if known { weight } else { unknown_still_weight() + metadata }).saturating_add(helper);
     }

@@ -617,8 +617,19 @@ fn manifest(exe_name: &str, unvirtualized: bool) -> String {
     )
 }
 
+fn same_asset(path: &Path, bytes: &[u8]) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
+    if meta.file_type().is_symlink() || meta.len() != bytes.len() as u64 {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    let mut existing = Vec::with_capacity(bytes.len());
+    file.take(bytes.len() as u64 + 1).read_to_end(&mut existing).is_ok() && existing == bytes
+}
+
 fn write_asset(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if std::fs::read(path).ok().as_deref() == Some(bytes) {
+    if same_asset(path, bytes) {
         return Ok(());
     }
     crate::convert::write_atomic(path, bytes)
@@ -645,7 +656,7 @@ pub fn application_user_model_id() -> String {
 
 fn write_package(dir: &Path, exe_name: &str, unvirtualized: bool) -> anyhow::Result<()> {
     write_assets(dir)?;
-    std::fs::write(dir.join("AppxManifest.xml"), manifest(exe_name, unvirtualized))?;
+    crate::convert::write_atomic(&dir.join("AppxManifest.xml"), manifest(exe_name, unvirtualized).as_bytes())?;
     Ok(())
 }
 
@@ -808,7 +819,7 @@ fn register(exe: &Path) -> anyhow::Result<()> {
         result.map_err(|e| anyhow::anyhow!("registering the package: {e}"))
     });
     result?;
-    std::fs::write(marker(&dir), stamp(exe))?;
+    crate::convert::write_atomic(&marker(&dir), stamp(exe).as_bytes())?;
     Ok(())
 }
 
@@ -818,8 +829,16 @@ fn unregister(dir: &Path) {
     }
 }
 
+fn marker_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(64 << 10).read_to_end(&mut bytes).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 fn is_registered(dir: &Path, exe: &Path) -> bool {
-    std::fs::read_to_string(marker(dir)).ok().as_deref() == Some(stamp(exe).as_str()) && installed_packages().is_none_or(|installed| installed.iter().any(|n| is_current(n)))
+    marker_text(&marker(dir)).as_deref() == Some(stamp(exe).as_str()) && installed_packages().is_none_or(|installed| installed.iter().any(|n| is_current(n)))
 }
 
 fn is_left(dir: &Path) -> bool {

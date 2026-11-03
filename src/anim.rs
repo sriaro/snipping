@@ -74,7 +74,10 @@ fn sniff(path: &Path) -> Option<Sniff> {
     use std::io::Read;
     let mut head = [0u8; 16];
     let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
-    let head = &head[..n];
+    sniff_head(&head[..n])
+}
+
+fn sniff_head(head: &[u8]) -> Option<Sniff> {
     if head.starts_with(b"GIF8") {
         Some(Sniff::Gif)
     } else if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP" {
@@ -379,27 +382,22 @@ pub fn decode(path: &Path, sink: &mut dyn Sink, stop: &Stop) -> Result<bool> {
     crate::convert::decode_animation(path, sink, stop)
 }
 
-pub(crate) fn decode_here(path: &Path, sink: &mut dyn Sink) -> Result<bool> {
-    let read = || crate::convert::read_image_bytes(path);
-    match sniff(path) {
-        Some(Sniff::Gif) => gif(path, sink),
-        Some(Sniff::Webp) => webp(&read()?, sink),
-        Some(Sniff::Avif) => avif_in_process(&read()?, sink),
+pub(crate) fn decode_bytes(bytes: &[u8], sink: &mut dyn Sink) -> Result<bool> {
+    match sniff_head(bytes) {
+        Some(Sniff::Gif) => gif(bytes, sink),
+        Some(Sniff::Webp) => webp(bytes, sink),
+        Some(Sniff::Avif) => avif_in_process(bytes, sink),
         None => Ok(false),
     }
 }
 
-fn gif(path: &Path, sink: &mut dyn Sink) -> Result<bool> {
-    let len = std::fs::metadata(path)?.len();
-    if len > 512 << 20 {
-        bail!("the file is too large to open ({} MB)", len >> 20);
-    }
-    gif_walked(path, sink, gif_pictures(&mut BufReader::new(std::fs::File::open(path)?), MAX_FRAMES + 1))
+fn gif(bytes: &[u8], sink: &mut dyn Sink) -> Result<bool> {
+    gif_walked(bytes, sink, gif_pictures(&mut std::io::Cursor::new(bytes), MAX_FRAMES + 1))
 }
 
-fn gif_walked(path: &Path, sink: &mut dyn Sink, (pictures, whole): (usize, bool)) -> Result<bool> {
+fn gif_walked(bytes: &[u8], sink: &mut dyn Sink, (pictures, whole): (usize, bool)) -> Result<bool> {
     use image::{AnimationDecoder, ImageDecoder, codecs::gif::GifDecoder};
-    let mut decoder = GifDecoder::new(BufReader::new(std::fs::File::open(path)?)).map_err(|e| anyhow!("GIF: {e}"))?;
+    let mut decoder = GifDecoder::new(std::io::Cursor::new(bytes)).map_err(|e| anyhow!("GIF: {e}"))?;
     let (w, h) = decoder.dimensions();
     check_size(w, h)?;
     let mut limits = image::Limits::no_limits();
@@ -411,7 +409,7 @@ fn gif_walked(path: &Path, sink: &mut dyn Sink, (pictures, whole): (usize, bool)
     if pictures >= 2 {
         check(w, h, pictures)?;
     }
-    let plays = gif_plays(&mut BufReader::new(std::fs::File::open(path)?));
+    let plays = gif_plays(&mut std::io::Cursor::new(bytes));
     let mut held = Held::new(sink, w, h, plays);
     for frame in decoder.into_frames() {
         let frame = frame.map_err(|e| match e {
