@@ -99,7 +99,7 @@ const KEPT_BYTES: usize = 1 << 20;
 
 impl FontFile {
     fn read(path: &Path) -> Option<Self> {
-        Self::from_bytes(std::fs::read(path).ok()?)
+        Self::from_bytes(read_font_file(path)?)
     }
 
     fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
@@ -343,7 +343,7 @@ pub struct Text {
 }
 
 fn fonts_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into())).join("Fonts")
+    crate::app_convert::windows_dir().join("Fonts")
 }
 
 static REGULAR: OnceLock<Option<Arc<Text>>> = OnceLock::new();
@@ -912,11 +912,14 @@ mod system {
 const MAX_FONT_BYTES: u64 = 128 << 20;
 
 fn read_font_file(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
         return None;
     }
-    std::fs::read(path).ok()
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    std::fs::File::open(path).ok()?.take(MAX_FONT_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_FONT_BYTES).then_some(bytes)
 }
 
 fn read_font(path: &Path) -> Option<(Font, bool)> {
