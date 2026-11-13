@@ -1559,7 +1559,6 @@ dependencies = [
  "byteorder-lite",
  "color_quant",
  "gif",
- "image-webp",
  "moxcms",
  "num-traits",
  "png",
@@ -3451,7 +3450,7 @@ checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 
 [[package]]
 name = "snipping"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "arboard",

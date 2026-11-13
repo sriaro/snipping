@@ -179,7 +179,7 @@ pub fn from_rgba16(px: Vec<u16>, w: u32, h: u32, cp: u8, tc: u8) -> Deep {
 }
 
 pub fn resize(mut d: Deep, mode: ResizeMode, filter: ResizeFilter) -> Result<Deep> {
-    use fast_image_resize::{MulDiv, PixelType, ResizeOptions, Resizer, images::Image};
+    use fast_image_resize::{IntoImageView, IntoImageViewMut, MulDiv, PixelType, ResizeOptions, Resizer, images::Image, pixels::U16x4};
     let (w, h) = (d.w, d.h);
     let (nw, nh) = crate::convert::resized_size(w, h, mode);
     if (nw, nh) == (w, h) {
@@ -191,12 +191,15 @@ pub fn resize(mut d: Deep, mode: ResizeMode, filter: ResizeFilter) -> Result<Dee
     let mut dst = Image::from_slice_u8(nw, nh, bytemuck::cast_slice_mut::<u16, u8>(&mut px), PixelType::U16x4).map_err(|e| anyhow!("resize: {e}"))?;
     let muldiv = MulDiv::default();
     if d.alpha {
-        muldiv.multiply_alpha_inplace(&mut src).map_err(|e| anyhow!("resize: {e}"))?;
+        muldiv.multiply_alpha_inplace_typed(&mut src.image_view_mut::<U16x4>().ok_or_else(|| anyhow!("resize: pixel type"))?).map_err(|e| anyhow!("resize: {e}"))?;
     }
-    Resizer::new().resize(&src, &mut dst, &ResizeOptions::new().resize_alg(crate::convert::resize_alg(filter)).use_alpha(false)).map_err(|e| anyhow!("resize: {e}"))?;
+    let from = src.image_view::<U16x4>().ok_or_else(|| anyhow!("resize: pixel type"))?;
+    let mut to = dst.image_view_mut::<U16x4>().ok_or_else(|| anyhow!("resize: pixel type"))?;
+    Resizer::new().resize_typed(&from, &mut to, &ResizeOptions::new().resize_alg(crate::convert::resize_alg(filter)).use_alpha(false)).map_err(|e| anyhow!("resize: {e}"))?;
     if d.alpha {
-        muldiv.divide_alpha_inplace(&mut dst).map_err(|e| anyhow!("resize: {e}"))?;
+        muldiv.divide_alpha_inplace_typed(&mut to).map_err(|e| anyhow!("resize: {e}"))?;
     }
+    drop(to);
     Ok(Deep { px, w: nw, h: nh, cp: d.cp, tc: d.tc, alpha: d.alpha, icc: d.icc })
 }
 

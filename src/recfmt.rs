@@ -275,9 +275,11 @@ impl Scaler {
     }
 
     fn scale(&mut self, px: &[u8], w: u32, h: u32) -> Result<&[u8]> {
-        use fast_image_resize::{PixelType, images::ImageRef};
-        let src = ImageRef::new(w, h, px, PixelType::U8x4).map_err(|e| anyhow!("resize: {e}"))?;
-        self.resizer.resize(&src, &mut self.out, &self.options).map_err(|e| anyhow!("resize: {e}"))?;
+        use fast_image_resize::{IntoImageViewMut, images::TypedImageRef, pixels::U8x4};
+        let src = TypedImageRef::<U8x4>::from_buffer(w, h, px).map_err(|e| anyhow!("resize: {e}"))?;
+        let mut out = self.out.image_view_mut::<U8x4>().ok_or_else(|| anyhow!("resize: pixel type"))?;
+        self.resizer.resize_typed(&src, &mut out, &self.options).map_err(|e| anyhow!("resize: {e}"))?;
+        drop(out);
         Ok(self.out.buffer())
     }
 }

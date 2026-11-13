@@ -190,10 +190,14 @@ impl Session {
         let (Some(t), Some(tool)) = (self.tb.as_ref(), self.tool) else {
             return;
         };
+        let Some(item) = t.tb.items.get(idx).map(|i| i.0).filter(|i| matches!(i, Item::Slider | Item::Strength)) else {
+            self.slider_drag = None;
+            return;
+        };
         let x = px - t.origin.0;
         let (level, pos) = (t.tb.slider_level(idx, x), t.tb.slider_pos(idx, x));
         let style = &mut self.styles[tool.index()];
-        if t.tb.items[idx].0 == Item::Strength {
+        if item == Item::Strength {
             style.strength = level as u8;
             self.strength_t = Some(pos);
         } else if style.uses_size(tool) {

@@ -208,7 +208,7 @@ pub(crate) fn png_options(level: PngLevel) -> (image::codecs::png::CompressionTy
 }
 
 pub fn resize(rgba: Vec<u8>, w: u32, h: u32, mode: ResizeMode, filter: ResizeFilter) -> Result<(Vec<u8>, u32, u32)> {
-    use fast_image_resize::{MulDiv, PixelType, ResizeOptions, Resizer, images::Image};
+    use fast_image_resize::{IntoImageView, IntoImageViewMut, MulDiv, PixelType, ResizeOptions, Resizer, images::Image, pixels::U8x4};
     let (nw, nh) = resized_size(w, h, mode);
     if (nw, nh) == (w, h) {
         return Ok((rgba, w, h));
@@ -219,12 +219,15 @@ pub fn resize(rgba: Vec<u8>, w: u32, h: u32, mode: ResizeMode, filter: ResizeFil
     let mut dst = Image::new(nw, nh, PixelType::U8x4);
     let muldiv = MulDiv::default();
     if !opaque {
-        muldiv.multiply_alpha_inplace(&mut src).map_err(|e| anyhow!("resize: {e}"))?;
+        muldiv.multiply_alpha_inplace_typed(&mut src.image_view_mut::<U8x4>().ok_or_else(|| anyhow!("resize: pixel type"))?).map_err(|e| anyhow!("resize: {e}"))?;
     }
-    Resizer::new().resize(&src, &mut dst, &ResizeOptions::new().resize_alg(resize_alg(filter)).use_alpha(false)).map_err(|e| anyhow!("resize: {e}"))?;
+    let from = src.image_view::<U8x4>().ok_or_else(|| anyhow!("resize: pixel type"))?;
+    let mut to = dst.image_view_mut::<U8x4>().ok_or_else(|| anyhow!("resize: pixel type"))?;
+    Resizer::new().resize_typed(&from, &mut to, &ResizeOptions::new().resize_alg(resize_alg(filter)).use_alpha(false)).map_err(|e| anyhow!("resize: {e}"))?;
     if !opaque {
-        muldiv.divide_alpha_inplace(&mut dst).map_err(|e| anyhow!("resize: {e}"))?;
+        muldiv.divide_alpha_inplace_typed(&mut to).map_err(|e| anyhow!("resize: {e}"))?;
     }
+    drop(to);
     Ok((dst.into_vec(), nw, nh))
 }
 
@@ -1185,6 +1188,9 @@ fn decode_with_image<R: std::io::BufRead + std::io::Seek + 'static>(path: &Path,
     let mut reader = reader.with_guessed_format().with_context(|| format!("can't read {}", path.display()))?;
     if !image_format_allowed(reader.format()) {
         bail!("{} is not a picture format Snipping reads", path.display());
+    }
+    if reader.format() == Some(image::ImageFormat::WebP) {
+        bail!("can't read {}: the file isn't a valid WebP picture", path.display());
     }
     if matches!(reader.format(), Some(image::ImageFormat::Ico | image::ImageFormat::Tiff)) && !IN_HELPER.load(Ordering::Relaxed) {
         bail!("can't read {}: the file changed while it was being read", path.display());

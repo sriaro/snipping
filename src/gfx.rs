@@ -490,7 +490,9 @@ impl Gfx {
         });
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+        let (Some(format), Some(alpha_mode)) = (caps.formats.iter().copied().find(|f| !f.is_srgb()).or_else(|| caps.formats.first().copied()), caps.alpha_modes.first().copied()) else {
+            bail!("the display surface reports no usable format");
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -499,7 +501,7 @@ impl Gfx {
             height: 1,
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 1,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
         };
         surface.configure(&device, &config);
